@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "owlet",
+  "mainBinaryName": "owlet",
+  "version": "0.1.1",
+  "identifier": "dev.owlet.ui",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Owlet",
+        "width": 960,
+        "height": 720,
+        "minWidth": 640,
+        "minHeight": 480
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "connect-src": "ipc: http://ipc.localhost",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "connect-src": "ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "signingIdentity": "-"
+    },
+    "icon": [
+      "icons/icon.png",
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFGOTE1QUU4OEFEODI2NzkKUldSNUp0aUs2RnFSSDR4UXlhRk50eTE3UFZFaE5iY0d5bnRUajR5THF6R3JxbE1tZEcxekQxNXgK",
+      "endpoints": [
+        "https://github.com/dennis0700/owlet/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

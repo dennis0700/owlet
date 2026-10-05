@@ -1,0 +1,237 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Every action pinned below declares `using: node24` (or is composite). This
+  # also forces any Node 20 action that slips in onto Node 24.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  ZIG_VERSION: 0.17.0
+  ZIG_SHA256: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+  CARGO_ZIGBUILD_VERSION: 0.23.4
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check tag matches Cargo.toml version
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+            exit 1
+          fi
+
+      - name: Check UI versions match the tag
+        shell: bash
+        run: |
+          check() {
+            if [ "v$2" != "${GITHUB_REF_NAME}" ]; then
+              echo "::error file=$1::tag ${GITHUB_REF_NAME} does not match version $2"
+              exit 1
+            fi
+          }
+          check ui/src-tauri/Cargo.toml "$(grep -m1 '^version' ui/src-tauri/Cargo.toml | cut -d'"' -f2)"
+          check ui/src-tauri/tauri.conf.json "$(grep -m1 '"version"' ui/src-tauri/tauri.conf.json | cut -d'"' -f4)"
+          check ui/package.json "$(grep -m1 '"version"' ui/package.json | cut -d'"' -f4)"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  build-linux:
+    name: build (${{ matrix.target }})
+    needs: check
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install zig
+        run: |
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/zig"
+          tar -xJf zig.tar.xz -C "${RUNNER_TEMP}/zig" --strip-components=1
+          rm zig.tar.xz
+          echo "${RUNNER_TEMP}/zig" >> "${GITHUB_PATH}"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
+
+      - name: Build
+        run: cargo zigbuild --locked --release --target ${{ matrix.target }}
+
+      - name: Verify static binary
+        run: |
+          bin="target/${{ matrix.target }}/release/owlet"
+          file "${bin}"
+          file "${bin}" | grep -q "statically linked"
+
+      - uses: ./.github/actions/package
+        with:
+          target: ${{ matrix.target }}
+
+  build-macos:
+    name: build (aarch64-apple-darwin)
+    needs: check
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-apple-darwin
+
+      - name: Build
+        run: cargo build --locked --release --target aarch64-apple-darwin
+
+      - uses: ./.github/actions/package
+        with:
+          target: aarch64-apple-darwin
+
+  build-ui:
+    name: ui (aarch64-apple-darwin)
+    needs: check
+    runs-on: macos-15
+    env:
+      TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui/src-tauri
+          key: ${{ env.TARGET }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Build
+        working-directory: ui
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri -- build --target ${{ env.TARGET }} --bundles app,dmg -- --locked
+
+      - name: Package
+        run: |
+          bundle="ui/src-tauri/target/${TARGET}/release/bundle"
+          name="owlet-ui-${GITHUB_REF_NAME}-${TARGET}"
+          mkdir -p dist-ui
+          cp "${bundle}"/dmg/*.dmg "dist-ui/${name}.dmg"
+          cp "${bundle}"/macos/*.app.tar.gz "dist-ui/${name}.app.tar.gz"
+          cp "${bundle}"/macos/*.app.tar.gz.sig "dist-ui/${name}.app.tar.gz.sig"
+          (cd dist-ui && shasum -a 256 "${name}.dmg" > "${name}.dmg.sha256")
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: owlet-ui-${{ env.TARGET }}
+          path: dist-ui/*
+          if-no-files-found: error
+
+  smoke:
+    name: smoke (${{ matrix.target }})
+    needs: [build-linux, build-macos]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-15 }
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: owlet-${{ matrix.target }}
+
+      - name: Run packaged binary
+        shell: bash
+        run: |
+          tar -xzf owlet-*.tar.gz
+          ./owlet-*/owlet --version
+          ./owlet-*/owlet --help > /dev/null
+
+  release:
+    needs: [smoke, build-ui]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write updater manifest
+        env:
+          REPO: ${{ github.repository }}
+          TARGET: aarch64-apple-darwin
+        run: |
+          name="owlet-ui-${GITHUB_REF_NAME}-${TARGET}.app.tar.gz"
+          jq -n \
+            --arg version "${GITHUB_REF_NAME#v}" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg sig "$(cat "dist/${name}.sig")" \
+            --arg url "https://github.com/${REPO}/releases/download/${GITHUB_REF_NAME}/${name}" \
+            '{version: $version, pub_date: $date, platforms: {"darwin-aarch64": {signature: $sig, url: $url}}}' \
+            > dist/latest.json
+          cat dist/latest.json
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.dmg
+            dist/*.sig
+            dist/*.sha256
+            dist/latest.json
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

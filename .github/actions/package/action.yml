@@ -1,0 +1,29 @@
+name: package
+description: Tar the release binary with the example config, write a sha256, upload as an artifact.
+
+inputs:
+  target:
+    description: Rust target triple that was built.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Package
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        name="owlet-${GITHUB_REF_NAME}-${TARGET}"
+        mkdir -p "dist/${name}"
+        cp "target/${TARGET}/release/owlet" config.example.toml README.md README.zh-CN.md "dist/${name}/"
+        tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+        (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: owlet-${{ inputs.target }}
+        path: |
+          dist/*.tar.gz
+          dist/*.sha256
+        if-no-files-found: error

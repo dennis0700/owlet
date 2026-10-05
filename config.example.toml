@@ -1,0 +1,42 @@
+# Copy to ~/.config/owlet/config.toml
+listen = "127.0.0.1:8808"
+# Or set $OWLET_TOKEN. Required when listening on a non-loopback address.
+token = "change-me"
+idle_timeout = 600      # stop an upstream process after N idle seconds
+session_ttl = 86400     # forget a client session after N idle seconds
+request_timeout = 300
+
+# Stateless: one process shared by every client.
+[servers.fetch]
+command = "uvx"
+args = ["mcp-server-fetch"]
+
+# Per project: one process per ?project=<abs path>, started with that cwd.
+[servers.codegraph]
+command = "codegraph"
+args = ["serve", "--mcp"]
+scope = "project"
+
+# Remote servers: owlet connects as a client; clients of owlet still use plain JSON.
+# `scope` may be "shared" or "session" (not "project").
+
+# Streamable HTTP (default transport for `url`).
+[servers.remote]
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer upstream-token" }
+
+# Legacy HTTP+SSE (2024-11-05); `url` is the SSE stream endpoint.
+[servers.legacy-remote]
+url = "http://127.0.0.1:9000/sse"
+transport = "sse"
+headers = { Authorization = "Bearer upstream-token" }
+
+# Strong per-client state: one process per session, stopped on DELETE.
+# `enabled = false` keeps the entry but rejects clients until `owlet enable playwright`.
+[servers.playwright]
+command = "npx"
+args = ["-y", "@playwright/mcp@latest"]
+scope = "session"
+enabled = false
+idle_timeout = 300
+cache_lists = true
