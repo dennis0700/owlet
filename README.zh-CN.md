@@ -243,6 +243,8 @@ owlet plugin uninstall aws-mcp
 
 `install` 会校验 release 资产的 sha256，写入配置文件旁边的 `plugins/` 目录，并添加一条与上面类似的 `[servers.aws-mcp]`（已有的 `wasm` 条目保留原设置）。`uninstall` 删除该条目和文件。运行中的 owlet 需要重启才会生效。桌面 UI 的 Plugins 区域提供同样的操作和启用开关；在 UI 里改动先进入草稿，Save 后生效。
 
+要开发自己的插件，见 [docs/plugins.zh-CN.md](docs/plugins.zh-CN.md)。
+
 ## CLI
 
 ```

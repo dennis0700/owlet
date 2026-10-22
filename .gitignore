@@ -4,3 +4,6 @@
 /ui/dist
 /ui/src-tauri/target
 /ui/src-tauri/gen
+/.agents
+.kiro
+/semantic-review
