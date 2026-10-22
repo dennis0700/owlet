@@ -3,6 +3,9 @@
 //! The window hosts an [`owlet_gpui::AppModel`] rooted view that reproduces
 //! the former Tauri/React UI. Closing the window quits the whole application
 //! (there is no tray-resident mode; see the crate docs and FEAT-002 findings).
+//! Before quitting, the embedded server is shut down through its normal
+//! graceful path so upstream MCP child processes are stopped explicitly
+//! rather than left to OS teardown.
 
 use std::path::PathBuf;
 
@@ -24,7 +27,7 @@ fn main() {
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         let path = path.clone();
-        gpui_kit::open_window(
+        let (_window, model) = gpui_kit::open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Owlet".into()),
@@ -37,10 +40,11 @@ fn main() {
         )
         .expect("failed to open window");
 
-        // No tray: when the last window closes, quit the application (which
-        // stops the embedded owlet server with it).
-        cx.on_window_closed(|cx, _window_id| {
+        // No tray: when the last window closes, gracefully stop the embedded
+        // server (same path as the Stop button) and quit the application.
+        cx.on_window_closed(move |cx, _window_id| {
             if cx.windows().is_empty() {
+                model.read(cx).shutdown_server();
                 cx.quit();
             }
         })

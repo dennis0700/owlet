@@ -321,6 +321,24 @@ impl AppModel {
         cx.notify();
     }
 
+    /// Runs the graceful shutdown path (the same one the Stop button uses)
+    /// to completion, blocking the calling thread until it finishes.
+    ///
+    /// Intended for use on application quit, where no further polling or
+    /// `cx.notify()` will ever run: `main.rs` calls this right before
+    /// `cx.quit()` so `Hub::shutdown()` kills upstream MCP child processes
+    /// before the process exits, rather than relying on OS teardown.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// model.read(cx).shutdown_server();
+    /// cx.quit();
+    /// ```
+    pub fn shutdown_server(&self) {
+        self.runtime.block_on(self.server.stop());
+    }
+
     fn restart_server(&mut self, cx: &mut Context<Self>) {
         if self.restarting || self.snapshot().dirty {
             return;

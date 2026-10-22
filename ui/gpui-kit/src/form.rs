@@ -2,7 +2,12 @@
 //!
 //! The functions here turn the raw text of the add/edit server dialog into a
 //! validated [`ServerConfig`], and back, reproducing every rule and every
-//! user-facing error message of the original TypeScript verbatim.
+//! user-facing error message of the original TypeScript. The one deliberate
+//! divergence is idle-timeout parsing: this port uses `str::parse::<u64>`,
+//! which is stricter than the original `Number()`-based coercion. It rejects
+//! exotic forms the old UI silently accepted (`"1e2"`, `"0x5"`, `"5.0"`, and
+//! values above `u64::MAX`); all of these are outside what anyone types into a
+//! "seconds" field, and stricter validation is the safer behavior here.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
