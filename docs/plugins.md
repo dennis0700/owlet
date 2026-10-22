@@ -163,9 +163,12 @@ plugin runs.
   with Hardened Runtime, so JIT memory is accepted and plugins run with no extra
   setup. This is the common case for Linux and for running the server directly.
 
-- **Desktop app (Tauri bundle)** — the macOS `.app` is signed with Hardened
-  Runtime (the `runtime` code-signing flag). Under Hardened Runtime, wasmtime's
-  JIT needs **two** entitlements, not one:
+- **Desktop app (`ui/gpui-kit`)** — the gpui-kit app has no `.app`/`.dmg`
+  bundle or Hardened Runtime signing today (see [Desktop UI](../README.md#desktop-ui)),
+  so this concern does not currently apply to it; it runs the same as the
+  plain CLI binary above. The entitlements below were specific to the former
+  Tauri bundle and are kept here only as a reference in case a signed bundle
+  is built for this app in the future:
 
   ```xml
   <key>com.apple.security.cs.allow-jit</key>
@@ -173,10 +176,6 @@ plugin runs.
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
   <true/>
   ```
-
-  Both are declared in [`ui/src-tauri/Entitlements.plist`](../ui/src-tauri/Entitlements.plist)
-  and referenced from `tauri.conf.json` under `bundle.macOS.entitlements`, so any
-  `tauri build` embeds them automatically.
 
   Missing `allow-unsigned-executable-memory` is the subtle one: the app launches
   fine and only crashes **when a plugin first runs**, with

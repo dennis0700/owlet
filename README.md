@@ -60,16 +60,16 @@ To run owlet as a background service on Linux, see [docs/systemd.md](docs/system
 
 ### Desktop UI (macOS)
 
-Download `owlet-ui-<version>-aarch64-apple-darwin.dmg` from Releases (Apple Silicon only) and drag `owlet.app` to Applications. The app runs owlet inside itself, so you do not need the CLI to use it. See [Desktop UI](#desktop-ui) for what it does.
+Download `owlet-ui-<version>-aarch64-apple-darwin.tar.gz` from Releases (Apple Silicon only), extract it, and run the `owlet-gpui` binary inside. The app runs owlet inside itself, so you do not need the CLI to use it. See [Desktop UI](#desktop-ui) for what it does.
 
-The app is signed ad hoc and not notarized by Apple, so on first launch macOS may say it cannot verify the developer. Right-click the app and choose **Open**, or allow it under System Settings → Privacy & Security. If macOS still refuses to open it, remove the quarantine flag with `xattr -cr /Applications/owlet.app`.
+There is no signed/notarized `.app` bundle yet, so macOS may warn about an unidentified developer when you run the extracted binary from Finder; allow it under System Settings → Privacy & Security, or remove the quarantine flag with `xattr -d com.apple.quarantine owlet-gpui`.
 
 On other platforms, build the UI from source (see [Desktop UI](#desktop-ui)).
 
 ## Update
 
 - CLI: run `owlet update`. It downloads the archive for your platform from GitHub Releases, verifies its sha256 and atomically replaces the running executable. Use `owlet update --check` to only see whether a newer version exists. Restart a running owlet afterwards. If the executable's directory is not writable (for example `/usr/local/bin`), run it with `sudo`.
-- Desktop UI: it checks once at startup. Press **Check for updates** (or **Update to x.y.z** when one is found) to download, verify the signature, install and relaunch.
+- Desktop UI: it checks once at startup. Press **Check for updates**; if a newer release exists, it shows the version and notes with a button that opens the download (or the release page, if no matching archive is found) in your browser. It does not download, verify or install anything itself.
 
 ## Quick start
 
@@ -276,20 +276,19 @@ sessions: 4
 
 ## Desktop UI
 
-`ui/` contains a Tauri 2 app (React + TypeScript) for managing the `[servers]` table of the config file and running owlet in the tray. On macOS, install it from the `.dmg` (see [Install](#desktop-ui-macos)). It is a separate Cargo workspace, so `cargo build` at the repository root does not need the Tauri toolchain.
+`ui/gpui-kit` contains a pure-Rust [gpui-kit](https://gpui-kit.com/docs) app for managing the `[servers]` table of the config file and running owlet inside it. It is a separate Cargo workspace, so `cargo build` at the repository root does not need its toolchain requirements.
 
 To build it yourself:
 
 ```sh
-cd ui
-npm install
-npm run tauri dev      # or: npm run tauri build
+cd ui/gpui-kit
+cargo build --release    # or: cargo run
 ```
 
 - It edits the file given by `$OWLET_CONFIG`, or `~/.config/owlet/config.toml` by default. The path is shown in the window.
 - The switch, add, edit and delete actions only change an in-memory draft. Nothing is written until you press **Save**; **Discard** drops the draft.
 - Saving rewrites only `[servers]`. Comments, other keys and untouched entries are preserved.
-- Closing the window hides it in the tray (menu bar on macOS) and keeps the draft. Click the tray icon or the Dock icon to show it again; use the tray menu's **Quit** to exit. Quitting discards an unsaved draft.
+- Closing the window quits the whole application, including the embedded owlet server (there is no tray-resident mode). Quitting discards an unsaved draft.
 - It starts its own owlet on the configured `listen` address and shows its status (**Start**, **Stop**, **Restart**). Press **Restart** after saving to apply changes. It does not control a separately running `owlet` process; stop that one first, or the port will be taken.
 - If the config file cannot be parsed, the UI shows the error and disables editing so the file is never overwritten.
 

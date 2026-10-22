@@ -60,16 +60,16 @@ cargo install --locked --git https://github.com/dennis0700/owlet
 
 ### 桌面应用（macOS）
 
-从 Releases 下载 `owlet-ui-<version>-aarch64-apple-darwin.dmg`（仅支持 Apple Silicon），把 `owlet.app` 拖进“应用程序”。应用内部自带 owlet，不需要另外安装 CLI。功能见[桌面 UI](#桌面-ui)。
+从 Releases 下载 `owlet-ui-<version>-aarch64-apple-darwin.tar.gz`（仅支持 Apple Silicon），解压后运行里面的 `owlet-gpui` 二进制文件。应用内部自带 owlet，不需要另外安装 CLI。功能见[桌面 UI](#桌面-ui)。
 
-应用使用 ad-hoc 签名，没有经过 Apple 公证，所以首次打开时 macOS 可能提示无法验证开发者。右键点击应用选择**打开**，或在“系统设置 → 隐私与安全性”里允许即可。如果仍然打不开，用 `xattr -cr /Applications/owlet.app` 去掉隔离标记。
+目前还没有签名/公证的 `.app` 包，所以从 Finder 运行解压出来的二进制文件时 macOS 可能会提示无法验证开发者；在“系统设置 → 隐私与安全性”里允许即可，或者用 `xattr -d com.apple.quarantine owlet-gpui` 去掉隔离标记。
 
 其他平台请从源码构建 UI（见[桌面 UI](#桌面-ui)）。
 
 ## 更新
 
 - CLI：运行 `owlet update`。它从 GitHub Releases 下载适合当前平台的压缩包，校验 sha256 后原子替换正在运行的可执行文件。加 `--check` 只检查是否有新版本，不安装。更新后需要手动重启正在运行的 owlet。可执行文件所在目录不可写时（例如装在 `/usr/local/bin`），请用 `sudo` 运行。
-- 桌面应用：启动时自动检查一次。点 **Check for updates**（发现新版本后按钮变成 **Update to x.y.z**），应用会下载、校验签名、安装并自动重启。
+- 桌面应用：启动时自动检查一次。点 **Check for updates**，如果有新版本，会显示版本号和更新说明，并提供一个按钮在浏览器里打开下载地址（找不到对应压缩包时打开发布页面）。它本身不会下载、校验或安装任何文件。
 
 ## 快速开始
 
@@ -275,20 +275,19 @@ sessions: 4
 
 ## 桌面 UI
 
-`ui/` 是一个 Tauri 2 应用（React + TypeScript），用来管理配置文件里的 `[servers]`，并在托盘里运行 owlet。macOS 上可以直接用 `.dmg` 安装（见[安装](#桌面应用macos)）。它是独立的 Cargo workspace，所以在仓库根目录执行 `cargo build` 不需要 Tauri 工具链。
+`ui/gpui-kit` 是一个纯 Rust 的 [gpui-kit](https://gpui-kit.com/docs) 应用，用来管理配置文件里的 `[servers]`，并在内部运行 owlet。它是独立的 Cargo workspace，所以在仓库根目录执行 `cargo build` 不需要它的工具链要求。
 
 自行构建：
 
 ```sh
-cd ui
-npm install
-npm run tauri dev      # 或：npm run tauri build
+cd ui/gpui-kit
+cargo build --release    # 或：cargo run
 ```
 
 - 编辑的是 `$OWLET_CONFIG` 指向的文件，未设置时为 `~/.config/owlet/config.toml`，路径会显示在窗口里。
 - 开关、新增、编辑、删除都只修改内存里的草稿，按 **Save** 才会写入文件；**Discard** 会丢弃草稿。
 - 保存时只改写 `[servers]`，注释、其他配置项和没改动的条目都会保留。
-- 关闭窗口会隐藏到托盘（macOS 是菜单栏），草稿保留。点托盘图标或 Dock 图标可以重新显示；用托盘菜单的 **Quit** 退出，退出时未保存的草稿会丢失。
+- 关闭窗口会退出整个应用，包括内置的 owlet server（没有托盘常驻模式）。退出时未保存的草稿会丢失。
 - 应用会在配置的 `listen` 地址上启动自己的 owlet，并显示状态（**Start**、**Stop**、**Restart**）。保存后点 **Restart** 让改动生效。它不会控制另外运行的 `owlet` 进程；如果已有一个在运行，请先停掉，否则端口会被占用。
 - 配置文件解析失败时，UI 会显示错误并禁用编辑，不会覆盖这个文件。
 

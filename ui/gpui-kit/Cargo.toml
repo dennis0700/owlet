@@ -1,6 +1,10 @@
 [package]
 name = "owlet-gpui"
-version = "0.1.0"
+# Kept in sync with the root `owlet` crate's version (see ../../Cargo.toml):
+# .github/workflows/release.yml tags a release as `v<root version>` and its
+# `check` job verifies this crate's version matches that tag too, so bump
+# both together.
+version = "0.2.0"
 edition = "2021"
 
 # Deliberately empty so that `cargo build`/`cargo test` run from the repo root

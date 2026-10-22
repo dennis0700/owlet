@@ -36,18 +36,14 @@ jobs:
             exit 1
           fi
 
-      - name: Check UI versions match the tag
+      - name: Check UI version matches the tag
         shell: bash
         run: |
-          check() {
-            if [ "v$2" != "${GITHUB_REF_NAME}" ]; then
-              echo "::error file=$1::tag ${GITHUB_REF_NAME} does not match version $2"
-              exit 1
-            fi
-          }
-          check ui/src-tauri/Cargo.toml "$(grep -m1 '^version' ui/src-tauri/Cargo.toml | cut -d'"' -f2)"
-          check ui/src-tauri/tauri.conf.json "$(grep -m1 '"version"' ui/src-tauri/tauri.conf.json | cut -d'"' -f4)"
-          check ui/package.json "$(grep -m1 '"version"' ui/package.json | cut -d'"' -f4)"
+          version=$(grep -m1 '^version' ui/gpui-kit/Cargo.toml | cut -d'"' -f2)
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error file=ui/gpui-kit/Cargo.toml::tag ${GITHUB_REF_NAME} does not match version ${version}"
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -187,46 +183,34 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ui/src-tauri
+          workspaces: ui/gpui-kit
           key: ${{ env.TARGET }}
 
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: ui
-        run: npm ci
-
-      # Before the signed build, so a failure stops the job early. Debug builds
-      # load the UI from devUrl, so no frontend dist is needed here.
       - name: Test
-        working-directory: ui/src-tauri
+        working-directory: ui/gpui-kit
         run: cargo test --locked --target ${{ env.TARGET }}
 
       - name: Build
-        working-directory: ui
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri -- build --target ${{ env.TARGET }} --bundles app,dmg -- --locked
+        working-directory: ui/gpui-kit
+        run: cargo build --locked --release --target ${{ env.TARGET }}
 
+      # No .app/.dmg bundler exists for this gpui-kit crate yet (see FEAT-003
+      # findings), so this packages the plain binary. The updater falls back
+      # to the release page when no `.dmg` asset is found.
       - name: Package
         run: |
-          bundle="ui/src-tauri/target/${TARGET}/release/bundle"
           name="owlet-ui-${GITHUB_REF_NAME}-${TARGET}"
-          mkdir -p dist-ui
-          cp "${bundle}"/dmg/*.dmg "dist-ui/${name}.dmg"
-          cp "${bundle}"/macos/*.app.tar.gz "dist-ui/${name}.app.tar.gz"
-          cp "${bundle}"/macos/*.app.tar.gz.sig "dist-ui/${name}.app.tar.gz.sig"
-          (cd dist-ui && shasum -a 256 "${name}.dmg" > "${name}.dmg.sha256")
+          mkdir -p "dist-ui/${name}"
+          cp "ui/gpui-kit/target/${TARGET}/release/owlet-gpui" "dist-ui/${name}/"
+          tar -C dist-ui -czf "dist-ui/${name}.tar.gz" "${name}"
+          (cd dist-ui && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
 
       - uses: actions/upload-artifact@v7
         with:
           name: owlet-ui-${{ env.TARGET }}
-          path: dist-ui/*
+          path: |
+            dist-ui/*.tar.gz
+            dist-ui/*.sha256
           if-no-files-found: error
 
   smoke:
@@ -263,29 +247,11 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Write updater manifest
-        env:
-          REPO: ${{ github.repository }}
-          TARGET: aarch64-apple-darwin
-        run: |
-          name="owlet-ui-${GITHUB_REF_NAME}-${TARGET}.app.tar.gz"
-          jq -n \
-            --arg version "${GITHUB_REF_NAME#v}" \
-            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg sig "$(cat "dist/${name}.sig")" \
-            --arg url "https://github.com/${REPO}/releases/download/${GITHUB_REF_NAME}/${name}" \
-            '{version: $version, pub_date: $date, platforms: {"darwin-aarch64": {signature: $sig, url: $url}}}' \
-            > dist/latest.json
-          cat dist/latest.json
-
       - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.tar.gz
-            dist/*.dmg
-            dist/*.sig
             dist/*.wasm
             dist/*.sha256
-            dist/latest.json
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}

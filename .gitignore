@@ -1,9 +1,5 @@
 /target
 /plugins/*/target
-/ui/node_modules
-/ui/dist
-/ui/src-tauri/target
-/ui/src-tauri/gen
 /ui/gpui-kit/target
 /.agents
 .kiro

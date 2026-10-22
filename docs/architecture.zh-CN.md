@@ -394,18 +394,19 @@ flowchart LR
     T["推送 v* tag"] --> C["check<br/>tag 与版本一致<br/>clippy + test"]
     C --> BL["build-linux<br/>cargo zigbuild，musl"]
     C --> BM["build-macos<br/>CLI，aarch64"]
-    C --> BU["build-ui<br/>签名的 .dmg + 更新包"]
+    C --> BU["build-ui<br/>gpui-kit 二进制压缩包"]
     BL --> S["smoke<br/>原生 runner"]
     BM --> S
-    S --> R["release<br/>tar 包、dmg、latest.json"]
+    S --> R["release<br/>tar 包、sha256"]
     BU --> R
 ```
 
-1. `check`：确认 tag 与 `Cargo.toml`、`ui/src-tauri/Cargo.toml`、`ui/src-tauri/tauri.conf.json`、`ui/package.json` 里的版本一致，然后在 Linux 和 macOS 上运行 clippy（`-D warnings`）和测试。
+1. `check`：确认 tag 与 `Cargo.toml`、`ui/gpui-kit/Cargo.toml` 里的版本一致，然后在 Linux 和 macOS 上运行 clippy（`-D warnings`）和测试。
 2. `build-linux`：用 `cargo zigbuild` 构建 `x86_64-unknown-linux-musl` 和 `aarch64-unknown-linux-musl`。Zig 的版本固定，下载后校验 sha256。构建完检查产物是否为静态链接。Zig 同时提供 `aws-lc-rs`（经由 rustls 引入）所需的 C 工具链，所以不需要 cmake。
 3. `build-macos`：在 `macos-15` 上构建 `aarch64-apple-darwin` 的 CLI。
-4. `build-ui`：在 `macos-15` 上构建 `aarch64-apple-darwin` 的 Tauri 桌面应用。应用包做 ad-hoc 签名，更新包（`.app.tar.gz`）用 secret `TAURI_SIGNING_PRIVATE_KEY` 里的 minisign 私钥签名。构建完成后再运行 `ui/src-tauri` 的测试。对应的公钥写在 `tauri.conf.json` 里，所以私钥丢失后，已安装的应用就无法再更新。
+4. `build-ui`：在 `macos-15` 上构建 `aarch64-apple-darwin` 的 gpui-kit 桌面应用（在独立 Cargo workspace `ui/gpui-kit` 里执行普通的 `cargo build --release`），运行它的测试，然后把原始二进制打包成 tar 包并附上 `.sha256`。目前还没有 `.app`/`.dmg` 打包步骤；找不到对应的打包资产时，桌面应用的更新检查会回退到 GitHub 发布页面。
 5. `smoke`：在各架构对应的原生 runner（`ubuntu-24.04`、`ubuntu-24.04-arm`、`macos-15`）上运行打包好的 CLI 二进制。
+6. `release`：把 CLI 和 UI 的 tar 包、插件 `.wasm` 以及 `.sha256` 文件上传到 GitHub Release，tag 中带 `-` 的标记为 prerelease。
 6. `release`：生成 `latest.json`（桌面应用检查更新时读取的清单），然后把 CLI 的 tar 包、`.dmg`、签名的更新包和 `.sha256` 文件上传到 GitHub Release，tag 中带 `-` 的标记为 prerelease。
 
 `owlet update` 通过 GitHub API 读取最新的 release，下载与自己 target triple 对应的 tar 包，用 `.sha256` 文件校验通过后才替换可执行文件。
