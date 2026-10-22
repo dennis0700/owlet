@@ -7,17 +7,23 @@ publish = false
 # owlet WASM plugin: a SigV4-signing MCP Streamable HTTP proxy, the Rust
 # counterpart of `uvx mcp-proxy-for-aws <endpoint>`. Built independently of the
 # owlet workspace; targets wasm32-wasip2. `rlib` lets `cargo test` run the pure
-# logic on the host target.
+# logic on the host target. The AWS SDK crates are pinned and built without
+# default features: their HTTP goes through owlet's http import, so no TLS
+# stack or async executor is compiled in.
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow = "1.0.104"
-hmac = "0.13.0"
+aws-config = { version = "=1.8.13", default-features = false, features = ["behavior-version-latest"] }
+aws-credential-types = "=1.2.11"
+aws-runtime = { version = "=1.6.0", default-features = false }
+aws-sigv4 = { version = "=1.3.8", default-features = false, features = ["sign-http"] }
+aws-smithy-async = "=1.2.11"
+aws-smithy-runtime-api = { version = "=1.11.3", features = ["client"] }
+aws-smithy-types = "=1.4.3"
 serde_json = "1.0.151"
-sha1_smol = "=1.0.1"
-sha2 = "0.11.0"
 url = "2.5.8"
 wit-bindgen = "0.46.0"
 

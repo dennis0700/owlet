@@ -38,18 +38,7 @@ const CATALOG: &[Plugin] = &[Plugin {
         "--metadata",
         "AWS_REGION=us-west-2",
     ],
-    inherit_env: &[
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AWS_PROFILE",
-        "AWS_REGION",
-        "AWS_DEFAULT_REGION",
-        "AWS_CONFIG_FILE",
-        "AWS_SHARED_CREDENTIALS_FILE",
-        "AWS_MCP_PROXY_PROFILES",
-        "HOME",
-    ],
+    inherit_env: &["AWS_*", "HOME"],
     dirs: &["~/.aws"],
 }];
 
@@ -422,9 +411,7 @@ mod tests {
         let server = aws().server_config(&dir);
         Config::check_server(aws().name, &server).expect("valid");
         assert_eq!(server.wasm, Some(dir.join("aws-mcp.wasm")));
-        assert!(server.inherit_env.iter().all(|k| !k.ends_with('*')));
-        assert!(server.inherit_env.iter().any(|k| k == "AWS_PROFILE"));
-        assert!(!server.inherit_env.iter().any(|k| k == "AWS_BEARER_TOKEN"));
+        assert_eq!(server.inherit_env, ["AWS_*", "HOME"]);
         assert_eq!(server.scope, Scope::Session);
         assert!(Plugin::find("nope").is_err());
     }

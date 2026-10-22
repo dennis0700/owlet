@@ -215,25 +215,15 @@ transport = "sse"
 [servers.aws-mcp]
 wasm = "~/.config/owlet/plugins/aws-mcp.wasm"
 args = ["https://aws-mcp.us-east-1.api.aws/mcp", "--metadata", "AWS_REGION=us-west-2"]
-inherit_env = [
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_PROFILE",
-    "AWS_REGION",
-    "AWS_DEFAULT_REGION",
-    "AWS_CONFIG_FILE",
-    "AWS_SHARED_CREDENTIALS_FILE",
-    "AWS_MCP_PROXY_PROFILES",
-    "HOME",
-]
+# 可以改成只列出具体变量，避免把无关的 AWS_* 密钥（例如 AWS_BEARER_TOKEN）交给插件。
+inherit_env = ["AWS_*", "HOME"]
 dirs = ["~/.aws"]
 scope = "session"
 ```
 
 插件导出 `handle` 和 `on-shutdown`（见 `wit/mcp-plugin.wit`）。空闲实例停止时，owlet 会调用 `on-shutdown` 并给它 2 秒（包括 HTTP），让插件做清理（aws-mcp 会发送 session `DELETE`）；在调用中途被停止的实例会直接中断，不会调用它。在 `on-shutdown` 出现之前构建的 component 仍能安装，但启动会失败，请重新构建或重新安装。
 
-aws-mcp 插件用 SigV4 签名请求。凭证来自 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`，或 `~/.aws` 里的 profile（`--profile` 或 `AWS_PROFILE`）。支持的 profile 类型：静态密钥；`role_arn` 配合 `source_profile` 或 `credential_source = Environment`（STS AssumeRole）；`role_arn` 配合 `web_identity_token_file`；IAM Identity Center（`sso_session` 或旧式 `sso_start_url`）。临时凭证会缓存到过期前 5 分钟。SSO 使用 `aws sso login` 缓存在 `~/.aws/sso/cache` 下的 token，所以这个目录必须位于授予的 `dirs` 条目之内（例如 `~/.aws`）；插件无法刷新 token（dirs 是只读的），过期后请重新执行 `aws sso login`。`web_identity_token_file` 同样必须位于授予的 `dirs` 条目之内（例如 EKS 上的 `/var/run/secrets/eks.amazonaws.com/serviceaccount`）。profile 的配置项同时从 `~/.aws/config` 和 `~/.aws/credentials` 读取，与 AWS CLI 一样以后者为准。不支持 `credential_process`（WASI 无法启动进程）和 `mfa_serial`，也不支持不带 profile、仅靠 `AWS_ROLE_ARN`/`AWS_WEB_IDENTITY_TOKEN_FILE` 的 web identity、容器（ECS）凭证和 EC2 实例元数据（IMDS）。
+aws-mcp 插件用 AWS SDK for Rust 做 SigV4 签名（`aws-config` 解析凭证，`aws-sigv4` 签名；SDK 对 STS 和 ECS 的请求都经由 owlet 的 `http.send` 发出）。凭证来自 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`，或 `~/.aws` 里的 profile（`--profile` 或 `AWS_PROFILE`）。支持的 profile 类型：静态密钥；`role_arn` 配合 `source_profile` 或 `credential_source = Environment`（STS AssumeRole）；`role_arn` 配合 `web_identity_token_file`。未指定 profile 时，依次使用环境变量中的密钥、`default` profile、`AWS_ROLE_ARN`/`AWS_WEB_IDENTITY_TOKEN_FILE` 的 web identity 和容器（ECS）凭证。每个请求都会重新读取 profile 文件；临时凭证会缓存到过期前 5 分钟，或直到这些文件发生变化。`web_identity_token_file` 必须位于授予的 `dirs` 条目之内（例如 EKS 上的 `/var/run/secrets/eks.amazonaws.com/serviceaccount`）。profile 的配置项同时从 `~/.aws/config` 和 `~/.aws/credentials` 读取，与 AWS CLI 一样以后者为准。不支持 `credential_process`（WASI 无法启动进程）、`mfa_serial` 和 IAM Identity Center（SSO：`sso_session` 或旧式 `sso_start_url`）profile，也不支持 EC2 实例元数据（IMDS）：`http.send` 无法在非 EC2 环境中为元数据探测设置超时。
 
 其他选项与 `mcp-proxy-for-aws` 一致：
 

@@ -1,7 +1,7 @@
 //! Forwards one MCP message to the SigV4-protected Streamable HTTP endpoint and
 //! turns the HTTP response into the newline-separated reply owlet expects.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::SystemTime};
 
 use serde_json::{Map, Value, json};
 
@@ -57,8 +57,9 @@ struct Auth<'a> {
 }
 
 /// Handles one message from owlet. `send` performs `(method, url, headers,
-/// body)`: POSTs to the endpoint, plus STS / SSO portal calls of role and SSO
-/// profiles, whose credentials are kept in `cache`.
+/// body)`: POSTs to the endpoint; credentials are resolved through `cache`,
+/// whose STS / ECS calls take its own HTTP route. `now` is the current
+/// time.
 ///
 /// On HTTP 404 to a request carrying a session id, the stored `initialize` and
 /// `notifications/initialized` are replayed and the request is retried once.
@@ -79,7 +80,7 @@ pub fn handle(
     request: &str,
     env: Env,
     cache: &mut sigv4::Cache,
-    amz_date: &str,
+    now: SystemTime,
     mut send: impl FnMut(&str, &str, &[(String, String)], &[u8]) -> Result<Response, String>,
 ) -> String {
     let credentials = &mut Auth { env, cache };
@@ -110,7 +111,7 @@ pub fn handle(
             &options.profile,
             session,
             credentials,
-            amz_date,
+            now,
             &mut send,
         )
     {
@@ -125,7 +126,7 @@ pub fn handle(
             .and_then(Value::as_str)
             .unwrap_or_default();
         if !session.tools.contains_key(name) {
-            refresh_tools(options, session, credentials, amz_date, &mut send);
+            refresh_tools(options, session, credentials, now, &mut send);
         }
         let denied = match session.tools.get(name) {
             Some(true) => None,
@@ -181,7 +182,7 @@ pub fn handle(
                     msg,
                     id,
                     credentials,
-                    amz_date,
+                    now,
                     &mut send,
                 );
             }
@@ -196,7 +197,7 @@ pub fn handle(
         id.as_ref(),
         is_init,
         credentials,
-        amz_date,
+        now,
         &mut send,
     ) {
         Ok(messages) => messages,
@@ -231,14 +232,14 @@ pub fn handle(
 /// # Examples
 ///
 /// ```ignore
-/// proxy::shutdown(&options, &session, &env, &mut cache, &amz_date, owlet::plugin::http::send);
+/// proxy::shutdown(&options, &session, &env, &mut cache, SystemTime::now(), owlet::plugin::http::send);
 /// ```
 pub fn shutdown(
     options: &Options,
     session: &Session,
     env: Env,
     cache: &mut sigv4::Cache,
-    amz_date: &str,
+    now: SystemTime,
     mut send: impl FnMut(&str, &str, &[(String, String)], &[u8]) -> Result<Response, String>,
 ) {
     let profiles = session.profiles.iter().filter_map(|(name, s)| {
@@ -249,7 +250,7 @@ pub fn shutdown(
         Some((profile, s))
     });
     for (profile, session) in std::iter::once((&options.profile, session)).chain(profiles) {
-        delete_session(options, profile, session, env, cache, amz_date, &mut send);
+        delete_session(options, profile, session, env, cache, now, &mut send);
     }
 }
 
@@ -261,14 +262,14 @@ fn delete_session(
     session: &Session,
     env: Env,
     cache: &mut sigv4::Cache,
-    amz_date: &str,
+    now: SystemTime,
     send: &mut impl FnMut(&str, &str, &[(String, String)], &[u8]) -> Result<Response, String>,
 ) {
     if session.id.is_none() {
         return;
     }
-    let headers = sigv4::load_credentials(profile.name.as_deref(), env, cache, amz_date, send)
-        .and_then(|creds| signed_headers(options, session, "DELETE", &[], &creds, amz_date));
+    let headers = sigv4::load_credentials(profile.name.as_deref(), env, cache, now)
+        .and_then(|creds| signed_headers(options, session, "DELETE", &[], &creds, now));
     if let Ok(headers) = headers {
         let _ = send("DELETE", options.endpoint.as_str(), &headers, &[]);
     }
@@ -287,7 +288,7 @@ fn exchange(
     id: Option<&Value>,
     is_init: bool,
     auth: &mut Auth,
-    amz_date: &str,
+    now: SystemTime,
     send: &mut impl FnMut(&str, &str, &[(String, String)], &[u8]) -> Result<Response, String>,
 ) -> Result<Vec<String>, String> {
     let raw = is_init.then(|| msg.to_string());
@@ -295,7 +296,7 @@ fn exchange(
         inject_metadata(&mut msg, &profile.metadata);
     }
     let body = msg.to_string();
-    let mut resp = post(options, profile, session, &body, auth, amz_date, send)?;
+    let mut resp = post(options, profile, session, &body, auth, now, send)?;
 
     // Streamable HTTP: 404 to a request carrying a session id means the session
     // is gone. Nobody else will re-initialize, so replay the handshake and retry.
@@ -303,8 +304,8 @@ fn exchange(
         if is_init {
             session.init = None;
         }
-        recover(options, profile, session, auth, amz_date, send)?;
-        resp = post(options, profile, session, &body, auth, amz_date, send)?;
+        recover(options, profile, session, auth, now, send)?;
+        resp = post(options, profile, session, &body, auth, now, send)?;
     }
     if !(200..300).contains(&resp.status) {
         let text = String::from_utf8_lossy(&resp.body);
@@ -406,7 +407,7 @@ fn call_with_profile(
     msg: Value,
     id: &Value,
     auth: &mut Auth,
-    amz_date: &str,
+    now: SystemTime,
     send: &mut impl FnMut(&str, &str, &[(String, String)], &[u8]) -> Result<Response, String>,
 ) -> String {
     let mut profile_session = match session.profiles.remove(&name) {
@@ -414,9 +415,7 @@ fn call_with_profile(
         None => {
             let mut created = Session::default();
             let result = match &session.init {
-                Some(init) => {
-                    reinitialize(options, profile, &mut created, init, auth, amz_date, send)
-                }
+                Some(init) => reinitialize(options, profile, &mut created, init, auth, now, send),
                 None => Err("the client has not initialized the MCP session".to_owned()),
             };
             if let Err(e) = result {
@@ -440,7 +439,7 @@ fn call_with_profile(
         Some(id),
         false,
         auth,
-        amz_date,
+        now,
         send,
     ) {
         Ok(messages) => {
@@ -455,7 +454,7 @@ fn call_with_profile(
                 &profile_session,
                 auth.env,
                 auth.cache,
-                amz_date,
+                now,
                 send,
             );
             tool_error(
@@ -503,20 +502,14 @@ fn post(
     session: &Session,
     body: &str,
     auth: &mut Auth,
-    amz_date: &str,
+    now: SystemTime,
     send: &mut impl FnMut(&str, &str, &[(String, String)], &[u8]) -> Result<Response, String>,
 ) -> Result<Response, String> {
     let body = body.as_bytes();
     // Resolved for every request so rotated static keys are picked up.
-    let headers = sigv4::load_credentials(
-        profile.name.as_deref(),
-        auth.env,
-        auth.cache,
-        amz_date,
-        send,
-    )
-    .and_then(|creds| signed_headers(options, session, "POST", body, &creds, amz_date))
-    .map_err(|e| format!("{e:#}"))?;
+    let headers = sigv4::load_credentials(profile.name.as_deref(), auth.env, auth.cache, now)
+        .and_then(|creds| signed_headers(options, session, "POST", body, &creds, now))
+        .map_err(|e| format!("{e:#}"))?;
     send("POST", options.endpoint.as_str(), &headers, body)
 }
 
@@ -527,7 +520,7 @@ fn recover(
     profile: &Profile,
     session: &mut Session,
     auth: &mut Auth,
-    amz_date: &str,
+    now: SystemTime,
     send: &mut impl FnMut(&str, &str, &[(String, String)], &[u8]) -> Result<Response, String>,
 ) -> Result<(), String> {
     session.id = None;
@@ -536,7 +529,7 @@ fn recover(
         session.expired = false;
         return Err("MCP session expired (HTTP 404)".to_owned());
     };
-    let result = reinitialize(options, profile, session, &init, auth, amz_date, send);
+    let result = reinitialize(options, profile, session, &init, auth, now, send);
     session.init = Some(init);
     session.expired = result.is_err();
     result.map_err(|e| format!("MCP session expired (HTTP 404) and re-initialize failed: {e}"))
@@ -554,7 +547,7 @@ fn reinitialize(
     session: &mut Session,
     init: &str,
     auth: &mut Auth,
-    amz_date: &str,
+    now: SystemTime,
     send: &mut impl FnMut(&str, &str, &[(String, String)], &[u8]) -> Result<Response, String>,
 ) -> Result<(), String> {
     let mut init: Value =
@@ -566,7 +559,7 @@ fn reinitialize(
         session,
         &init.to_string(),
         auth,
-        amz_date,
+        now,
         send,
     )?;
     if !(200..300).contains(&resp.status) {
@@ -587,7 +580,7 @@ fn reinitialize(
         session,
         &note.to_string(),
         auth,
-        amz_date,
+        now,
         send,
     )
     .and_then(|resp| match resp.status {
@@ -596,9 +589,7 @@ fn reinitialize(
     });
     if result.is_err() {
         // Half-open: end the new session so a later replay does not leak it.
-        delete_session(
-            options, profile, session, auth.env, auth.cache, amz_date, send,
-        );
+        delete_session(options, profile, session, auth.env, auth.cache, now, send);
         session.id = None;
     }
     result
@@ -621,7 +612,7 @@ fn refresh_tools(
     options: &Options,
     session: &mut Session,
     auth: &mut Auth,
-    amz_date: &str,
+    now: SystemTime,
     send: &mut impl FnMut(&str, &str, &[(String, String)], &[u8]) -> Result<Response, String>,
 ) {
     let id = json!(LIST_ID);
@@ -638,7 +629,7 @@ fn refresh_tools(
             session,
             &req.to_string(),
             auth,
-            amz_date,
+            now,
             send,
         ) else {
             return;
@@ -698,18 +689,8 @@ fn signed_headers(
     method: &str,
     body: &[u8],
     creds: &sigv4::Credentials,
-    amz_date: &str,
+    now: SystemTime,
 ) -> anyhow::Result<Vec<(String, String)>> {
-    let signed = sigv4::sign(
-        creds,
-        method,
-        "application/json",
-        &options.region,
-        &options.service,
-        &options.endpoint,
-        body,
-        amz_date,
-    )?;
     let mut headers = vec![
         ("content-type".to_owned(), "application/json".to_owned()),
         (
@@ -717,18 +698,24 @@ fn signed_headers(
             "application/json, text/event-stream".to_owned(),
         ),
         ("content-length".to_owned(), body.len().to_string()),
-        ("x-amz-date".to_owned(), signed.amz_date),
-        ("authorization".to_owned(), signed.authorization),
     ];
-    if let Some(token) = signed.security_token {
-        headers.push(("x-amz-security-token".to_owned(), token));
-    }
     if let Some(sid) = &session.id {
         headers.push((SESSION_HEADER.to_owned(), sid.clone()));
     }
     if let Some(version) = &session.version {
         headers.push((VERSION_HEADER.to_owned(), version.clone()));
     }
+    let signed = sigv4::sign(
+        creds,
+        method,
+        &options.endpoint,
+        &headers,
+        body,
+        &options.region,
+        &options.service,
+        now,
+    )?;
+    headers.extend(signed);
     Ok(headers)
 }
 
@@ -764,7 +751,11 @@ fn error_reply(id: &Value, code: i64, message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::{
+        cell::RefCell,
+        sync::OnceLock,
+        time::{Duration, UNIX_EPOCH},
+    };
 
     use super::*;
     use crate::cli;
@@ -779,12 +770,36 @@ mod tests {
         cli::parse(&args, &|_| None).expect("options")
     }
 
+    /// Env whose shared credentials file has a `default` profile with
+    /// AKIDEXAMPLE; the file is written once per test run. `AWS_PROFILE` names
+    /// it so the SDK skips the real process environment's keys.
     fn creds(k: &str) -> Option<String> {
-        match k {
-            "AWS_ACCESS_KEY_ID" => Some("AKIDEXAMPLE".to_owned()),
-            "AWS_SECRET_ACCESS_KEY" => Some("secret".to_owned()),
-            _ => None,
+        static FILE: OnceLock<String> = OnceLock::new();
+        if k == "AWS_PROFILE" {
+            return Some("default".to_owned());
         }
+        (k == "AWS_SHARED_CREDENTIALS_FILE").then(|| {
+            FILE.get_or_init(|| {
+                let path = std::env::temp_dir().join("owlet-aws-proxy-test-credentials");
+                std::fs::write(
+                    &path,
+                    "[default]\naws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = secret\n",
+                )
+                .expect("write");
+                path.to_str().expect("utf-8").to_owned()
+            })
+            .clone()
+        })
+    }
+
+    /// 2024-01-01T00:00:00Z.
+    fn now() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_704_067_200)
+    }
+
+    /// The credential cache's HTTP route; static credentials never use it.
+    fn offline(_: &str, url: &str, _: &[(String, String)], _: &[u8]) -> Result<Response, String> {
+        Err(format!("unexpected request to {url}"))
     }
 
     fn response(status: u16, headers: &[(&str, &str)], body: &str) -> Response {
@@ -836,8 +851,8 @@ mod tests {
             &mut session,
             init,
             &creds,
-            &mut sigv4::Cache::new(),
-            "20240101T000000Z",
+            &mut sigv4::Cache::new(offline),
+            now(),
             |_, url, h, b| {
                 seen.borrow_mut()
                     .push((url.to_owned(), h.to_vec(), b.to_vec()));
@@ -880,8 +895,8 @@ mod tests {
             &mut session,
             list,
             &creds,
-            &mut sigv4::Cache::new(),
-            "20240101T000000Z",
+            &mut sigv4::Cache::new(offline),
+            now(),
             |_, _, h, _| {
                 assert!(h.contains(&(SESSION_HEADER.to_owned(), "s1".to_owned())));
                 assert!(h.contains(&(VERSION_HEADER.to_owned(), "2025-06-18".to_owned())));
@@ -903,8 +918,8 @@ mod tests {
             &mut session,
             note,
             &creds,
-            &mut sigv4::Cache::new(),
-            "20240101T000000Z",
+            &mut sigv4::Cache::new(offline),
+            now(),
             |_, _, _, _| Ok(response(202, &[], "")),
         );
         assert_eq!(reply, "");
@@ -915,14 +930,14 @@ mod tests {
         let opts = options();
         let mut session = Session::default();
         let req = r#"{"jsonrpc":"2.0","id":"a","method":"tools/list"}"#;
-        let date = "20240101T000000Z";
+        let date = now();
 
         let reply = handle(
             Ok(&opts),
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, _| Ok(response(403, &[], "denied")),
         );
@@ -936,7 +951,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, _| Err("dns error".to_owned()),
         );
@@ -947,8 +962,8 @@ mod tests {
             Ok(&opts),
             &mut session,
             req,
-            &|_| None,
-            &mut sigv4::Cache::new(),
+            &|k| (k == "AWS_PROFILE").then(|| "default".to_owned()),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, _| Err("must not be called".to_owned()),
         );
@@ -960,7 +975,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, _| Err("must not be called".to_owned()),
         );
@@ -971,7 +986,7 @@ mod tests {
             &mut session,
             "{",
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, _| Err("must not be called".to_owned()),
         );
@@ -986,7 +1001,7 @@ mod tests {
                 &mut session,
                 msg,
                 &creds,
-                &mut sigv4::Cache::new(),
+                &mut sigv4::Cache::new(offline),
                 date,
                 |_, _, _, _| Ok(response(500, &[], "boom")),
             );
@@ -999,7 +1014,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, _| {
                 Ok(response(
@@ -1015,7 +1030,7 @@ mod tests {
     #[test]
     fn expired_session_is_cleared_on_404() {
         let opts = options();
-        let date = "20240101T000000Z";
+        let date = now();
         let req = r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#;
 
         // Without a session a 404 is an ordinary HTTP error.
@@ -1025,7 +1040,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, _| Ok(response(404, &[], "nope")),
         );
@@ -1041,7 +1056,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, h, _| {
                 assert!(h.contains(&(SESSION_HEADER.to_owned(), "s1".to_owned())));
@@ -1093,7 +1108,7 @@ mod tests {
     #[test]
     fn expired_session_replays_initialize_and_retries() {
         let opts = options();
-        let date = "20240101T000000Z";
+        let date = now();
         let live = RefCell::new(0);
         let calls = RefCell::new(Vec::new());
         let mut send = |_: &str, _: &str, h: &[(String, String)], b: &[u8]| {
@@ -1109,7 +1124,7 @@ mod tests {
             &mut session,
             init,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1123,7 +1138,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1151,7 +1166,7 @@ mod tests {
     #[test]
     fn failed_replay_becomes_an_error() {
         let opts = options();
-        let date = "20240101T000000Z";
+        let date = now();
         let mut session = Session {
             id: Some("s1".to_owned()),
             init: Some(r#"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#.to_owned()),
@@ -1163,7 +1178,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, h, _| {
                 Ok(match h.iter().any(|(k, _)| k == SESSION_HEADER) {
@@ -1184,7 +1199,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, h, b| {
                 let msg: Value = serde_json::from_slice(b).expect("json");
@@ -1212,7 +1227,7 @@ mod tests {
     #[test]
     fn replay_without_protocol_version_fails() {
         let opts = options();
-        let date = "20240101T000000Z";
+        let date = now();
         let mut session = Session {
             id: Some("s1".to_owned()),
             init: Some(r#"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#.to_owned()),
@@ -1225,7 +1240,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, h, b| {
                 let msg: Value = serde_json::from_slice(b).expect("json");
@@ -1285,7 +1300,7 @@ mod tests {
 
     #[test]
     fn read_only_filters_tools_list() {
-        let date = "20240101T000000Z";
+        let date = now();
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
         let calls = RefCell::new(Vec::new());
 
@@ -1296,7 +1311,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, b| Ok(tool_server(&calls, b)),
         );
@@ -1310,7 +1325,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, b| Ok(tool_server(&calls, b)),
         );
@@ -1326,7 +1341,7 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, b| Ok(tool_server(&calls, b)),
         );
@@ -1346,7 +1361,7 @@ mod tests {
     #[test]
     fn read_only_gates_tools_call() {
         let opts = read_only_options();
-        let date = "20240101T000000Z";
+        let date = now();
         let call = |name: &str| {
             json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
                 "params": {"name": name, "arguments": {}}})
@@ -1371,7 +1386,7 @@ mod tests {
             &mut session,
             &call("write"),
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1397,7 +1412,7 @@ mod tests {
             &mut session,
             &call("read"),
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1413,7 +1428,7 @@ mod tests {
             &mut session,
             &call("bare"),
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1426,7 +1441,7 @@ mod tests {
             &mut session,
             &call("ghost"),
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1446,7 +1461,7 @@ mod tests {
             &mut session,
             &call("read"),
             &creds,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, _| Ok(response(429, &[], "slow down")),
         );
@@ -1530,7 +1545,7 @@ mod tests {
             cli::parse(&args, &env).expect("options")
         };
         let opts = parse(&["a", "b", "c"]);
-        let date = "20240101T000000Z";
+        let date = now();
         let seen = RefCell::new(Vec::new());
         let mut send =
             |_: &str, _: &str, h: &[(String, String)], b: &[u8]| Ok(profile_server(&seen, h, b));
@@ -1541,7 +1556,7 @@ mod tests {
             &mut session,
             init,
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1561,7 +1576,7 @@ mod tests {
             &mut session,
             list,
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1599,7 +1614,7 @@ mod tests {
             &mut session,
             &call("aws___call_aws", "b"),
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1634,7 +1649,7 @@ mod tests {
             &mut session,
             &call("aws___call_aws", "b"),
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1648,7 +1663,7 @@ mod tests {
                 &mut session,
                 &call(tool, profile),
                 &env,
-                &mut sigv4::Cache::new(),
+                &mut sigv4::Cache::new(offline),
                 date,
                 &mut send,
             );
@@ -1677,7 +1692,7 @@ mod tests {
             &mut session,
             &call("aws___call_aws", "zzz"),
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1691,7 +1706,7 @@ mod tests {
             &mut session,
             &call("aws___call_aws", "c"),
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1708,7 +1723,7 @@ mod tests {
             &mut session,
             &call("aws___call_aws", "b"),
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             |_, _, _, _| Err("connection reset".to_owned()),
         );
@@ -1725,7 +1740,7 @@ mod tests {
             &mut session,
             list,
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1735,7 +1750,7 @@ mod tests {
             &mut session,
             &call("aws___call_aws", "b"),
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1784,7 +1799,7 @@ mod tests {
             "b",
         ];
         let opts = cli::parse(&args.map(str::to_owned), &env).expect("options");
-        let date = "20240101T000000Z";
+        let date = now();
         let seen = RefCell::new(Vec::new());
         // Status the next request on b's session gets instead of a reply.
         let fail = RefCell::new(None::<u16>);
@@ -1813,7 +1828,7 @@ mod tests {
                 &mut session,
                 msg,
                 &env,
-                &mut sigv4::Cache::new(),
+                &mut sigv4::Cache::new(offline),
                 date,
                 &mut send,
             );
@@ -1828,7 +1843,7 @@ mod tests {
             &mut session,
             &profile_call("aws___call_aws", "b"),
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1859,7 +1874,7 @@ mod tests {
             &mut session,
             &profile_call("aws___call_aws", "b"),
             &env,
-            &mut sigv4::Cache::new(),
+            &mut sigv4::Cache::new(offline),
             date,
             &mut send,
         );
@@ -1894,8 +1909,8 @@ mod tests {
             &mut session,
             req,
             &creds,
-            &mut sigv4::Cache::new(),
-            "20240101T000000Z",
+            &mut sigv4::Cache::new(offline),
+            now(),
             |method, _, h, b| {
                 let sid = h
                     .iter()
@@ -1956,7 +1971,7 @@ mod tests {
             "b",
         ];
         let opts = cli::parse(&args.map(str::to_owned), &env).expect("options");
-        let date = "20240101T000000Z";
+        let date = now();
         let seen = RefCell::new(Vec::new());
         let mut send = |_: &str, _: &str, h: &[(String, String)], b: &[u8]| {
             let msg: Value = serde_json::from_slice(b).expect("json");
@@ -1980,7 +1995,7 @@ mod tests {
                 &mut session,
                 msg,
                 &env,
-                &mut sigv4::Cache::new(),
+                &mut sigv4::Cache::new(offline),
                 date,
                 &mut send,
             );
@@ -2056,8 +2071,8 @@ mod tests {
             &opts,
             &session,
             &env,
-            &mut sigv4::Cache::new(),
-            "20240101T000000Z",
+            &mut sigv4::Cache::new(offline),
+            now(),
             |method, url, h: &[(String, String)], body| {
                 let get = |name: &str| h.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
                 assert_eq!(url, "https://aws-mcp.us-east-1.api.aws/mcp");
@@ -2087,8 +2102,8 @@ mod tests {
             &opts,
             &Session::default(),
             &env,
-            &mut sigv4::Cache::new(),
-            "20240101T000000Z",
+            &mut sigv4::Cache::new(offline),
+            now(),
             |_, _, _, _| panic!("must not be called"),
         );
         let _ = std::fs::remove_dir_all(&dir);

@@ -327,7 +327,7 @@ flowchart LR
     R -->|SigV4 签名的 HTTPS| A[AWS MCP endpoint]
 ```
 
-- aws-mcp 插件（`plugins/aws`）通过 `http.send` 自行解析凭证：静态密钥、STS AssumeRole（`source_profile` 或 `credential_source = Environment`）、web identity，以及 `aws sso login` 缓存里的 SSO token（经 `dirs` 授权读取，不会刷新）。临时凭证缓存到过期前 5 分钟。`credential_process` 需要启动进程，`mfa_serial` 需要交互输入，所以两者都会报错。`--read-only` 按 `readOnlyHint` 过滤工具；配置多个 profile 时，认证类工具会多出 `aws_profile` 参数，每个非默认 profile 使用独立的后端 session，`on-shutdown` 也会删除这些 session。
+- aws-mcp 插件（`plugins/aws`）用 `aws-config` 解析凭证、用 `aws-sigv4` 签名，SDK 的 HTTP 请求（STS、ECS）经由 `http.send` 发出：静态密钥、STS AssumeRole（`source_profile` 或 `credential_source = Environment`）、web identity 以及 ECS 容器凭证。临时凭证缓存到过期前 5 分钟，或直到 profile 文件发生变化。`credential_process` 需要启动进程，`mfa_serial` 需要交互输入，IAM Identity Center（SSO）需要 SDK 的 `sso` feature（会引入 `ring`），IMDS 需要 `http.send` 无法设置的探测超时，所以都不支持。`--read-only` 按 `readOnlyHint` 过滤工具；配置多个 profile 时，认证类工具会多出 `aws_profile` 参数，每个非默认 profile 使用独立的后端 session，`on-shutdown` 也会删除这些 session。
 
 - `plugin.rs` 维护可安装的插件目录。`owlet plugin install`（以及 UI）从 GitHub release `v<owlet 版本>` 下载 `<asset>` 和 `<asset>.sha256`，确认内容能作为 component 加载后，原子写入 `<配置目录>/plugins/<name>.wasm`，并添加默认的 server 条目。
 

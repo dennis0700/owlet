@@ -30,29 +30,21 @@ wasm = "~/.config/owlet/plugins/echo.wasm"
 # That import reaches any http(s) URL, so only load plugins you trust.
 # An instance handles one message at a time; "session" scope avoids queueing
 # clients behind each other's slow calls.
-# Credentials: env keys or `~/.aws` profiles (static keys, role_arn with
-# source_profile / credential_source = Environment, web_identity_token_file,
-# SSO via the `aws sso login` cache; the SSO cache and the token file must be
-# inside `dirs`). credential_process, mfa_serial, profile-less web identity,
-# ECS container credentials and IMDS are not supported.
+# Credentials (AWS SDK chain): env keys, `~/.aws` profiles (static keys, role_arn
+# with source_profile / credential_source = Environment, web_identity_token_file;
+# the token file must be inside `dirs`), env web identity and ECS container
+# credentials.
+# credential_process (WASI cannot start processes), mfa_serial, SSO / IAM
+# Identity Center profiles and IMDS are not supported.
 # Add "--read-only" to expose only read-only tools, and "--profile", "a", "b"
 # (or AWS_MCP_PROXY_PROFILES="a b") to let auth tools take an `aws_profile` argument.
 # `owlet plugin install aws-mcp` downloads the plugin and adds this entry for you.
 # [servers.aws-mcp]
 # wasm = "~/.config/owlet/plugins/aws-mcp.wasm"
 # args = ["https://aws-mcp.us-east-1.api.aws/mcp", "--metadata", "AWS_REGION=us-west-2"]
-# inherit_env = [
-#     "AWS_ACCESS_KEY_ID",
-#     "AWS_SECRET_ACCESS_KEY",
-#     "AWS_SESSION_TOKEN",
-#     "AWS_PROFILE",
-#     "AWS_REGION",
-#     "AWS_DEFAULT_REGION",
-#     "AWS_CONFIG_FILE",
-#     "AWS_SHARED_CREDENTIALS_FILE",
-#     "AWS_MCP_PROXY_PROFILES",
-#     "HOME",
-# ]
+# # Narrow this to specific variables to keep unrelated AWS_* secrets
+# # (for example AWS_BEARER_TOKEN) away from the plugin.
+# inherit_env = ["AWS_*", "HOME"]
 # dirs = ["~/.aws"]
 # scope = "session"
 

@@ -73,8 +73,9 @@ const MAX_BODY: usize = 16 * 1024 * 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(100);
 /// How long the `on-shutdown` export may run, HTTP included.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
-/// Largest linear memory one plugin instance may grow to.
-const MAX_MEMORY: usize = 256 * 1024 * 1024;
+/// Largest linear memory one plugin instance may grow to: a loose guard
+/// against runaway plugins.
+const MAX_MEMORY: usize = 1024 * 1024 * 1024;
 
 /// Per-store state: the WASI context and HTTP client owlet grants the plugin.
 struct Host {

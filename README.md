@@ -215,25 +215,16 @@ A `wasm` server is a WebAssembly component that owlet runs in-process, with no e
 [servers.aws-mcp]
 wasm = "~/.config/owlet/plugins/aws-mcp.wasm"
 args = ["https://aws-mcp.us-east-1.api.aws/mcp", "--metadata", "AWS_REGION=us-west-2"]
-inherit_env = [
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_PROFILE",
-    "AWS_REGION",
-    "AWS_DEFAULT_REGION",
-    "AWS_CONFIG_FILE",
-    "AWS_SHARED_CREDENTIALS_FILE",
-    "AWS_MCP_PROXY_PROFILES",
-    "HOME",
-]
+# Narrow this to specific variables to keep unrelated AWS_* secrets
+# (for example AWS_BEARER_TOKEN) away from the plugin.
+inherit_env = ["AWS_*", "HOME"]
 dirs = ["~/.aws"]
 scope = "session"
 ```
 
 A plugin exports `handle` and `on-shutdown` (see `wit/mcp-plugin.wit`). When an idle instance stops, owlet calls `on-shutdown` and gives it 2 seconds, HTTP included, so the plugin can clean up (aws-mcp sends a session `DELETE`); an instance stopped in the middle of a call is cut off without it. Components built before `on-shutdown` existed still install but fail to start; rebuild or reinstall them.
 
-The aws-mcp plugin signs requests with SigV4. Credentials come from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` or a profile in `~/.aws` (`--profile` or `AWS_PROFILE`). Supported profile types: static keys, `role_arn` with `source_profile` or `credential_source = Environment` (STS AssumeRole), `role_arn` with `web_identity_token_file`, and IAM Identity Center (`sso_session` or legacy `sso_start_url`). Temporary credentials are cached until 5 minutes before they expire. SSO uses the token that `aws sso login` cached under `~/.aws/sso/cache`, so that directory must be inside a granted `dirs` entry such as `~/.aws`; the plugin cannot refresh the token (dirs are read-only), so run `aws sso login` again when it expires. A `web_identity_token_file` must likewise be inside a granted `dirs` entry (on EKS, for example, `/var/run/secrets/eks.amazonaws.com/serviceaccount`). A profile's keys are read from both `~/.aws/config` and `~/.aws/credentials`, with the latter winning, as in the AWS CLI. `credential_process` (WASI cannot start processes) and `mfa_serial` are not supported, nor are web identity from `AWS_ROLE_ARN`/`AWS_WEB_IDENTITY_TOKEN_FILE` without a profile, container (ECS) credentials and EC2 instance metadata (IMDS).
+The aws-mcp plugin signs requests with SigV4 using the AWS SDK for Rust (`aws-config` resolves credentials, `aws-sigv4` signs; the SDK's STS and ECS calls go through owlet's `http.send`). Credentials come from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` or a profile in `~/.aws` (`--profile` or `AWS_PROFILE`). Supported profile types: static keys, `role_arn` with `source_profile` or `credential_source = Environment` (STS AssumeRole), and `role_arn` with `web_identity_token_file`. Without a profile, environment keys come first, then the `default` profile, web identity from `AWS_ROLE_ARN`/`AWS_WEB_IDENTITY_TOKEN_FILE` and container (ECS) credentials. The profile files are re-read on every request; temporary credentials are cached until 5 minutes before they expire or until those files change. A `web_identity_token_file` must be inside a granted `dirs` entry (on EKS, for example, `/var/run/secrets/eks.amazonaws.com/serviceaccount`). A profile's keys are read from both `~/.aws/config` and `~/.aws/credentials`, with the latter winning, as in the AWS CLI. `credential_process` (WASI cannot start processes), `mfa_serial` and IAM Identity Center (SSO: `sso_session` or legacy `sso_start_url`) profiles are not supported, nor is EC2 instance metadata (IMDS): `http.send` cannot time out the metadata probe off EC2.
 
 Other options, as in `mcp-proxy-for-aws`:
 
