@@ -76,14 +76,69 @@ export default function ServerDialog({ editing, onSubmit, onCancel }: Props) {
             <input
               type="radio"
               name="kind"
-              checked={!isCommand}
+              checked={form.kind === "url"}
               onChange={() => set("kind", "url")}
             />
             Remote URL
           </label>
+          <label className="inline">
+            <input
+              type="radio"
+              name="kind"
+              checked={form.kind === "wasm"}
+              onChange={() => set("kind", "wasm")}
+            />
+            WASM plugin
+          </label>
         </fieldset>
 
-        {isCommand ? (
+        {form.kind === "wasm" && (
+          <>
+            <label>
+              WASM component
+              <input
+                value={form.wasm}
+                onChange={(e) => set("wasm", e.target.value)}
+                placeholder="~/.config/owlet/plugins/aws-mcp.wasm"
+              />
+            </label>
+            <label>
+              Arguments <small>one per line</small>
+              <textarea
+                rows={3}
+                value={form.args}
+                onChange={(e) => set("args", e.target.value)}
+              />
+            </label>
+            <label>
+              Environment <small>KEY=VALUE per line</small>
+              <textarea
+                rows={2}
+                value={form.env}
+                onChange={(e) => set("env", e.target.value)}
+              />
+            </label>
+            <label>
+              Inherited environment <small>host variable names, PREFIX* allowed, one per line</small>
+              <textarea
+                rows={2}
+                value={form.inheritEnv}
+                onChange={(e) => set("inheritEnv", e.target.value)}
+                placeholder="AWS_*"
+              />
+            </label>
+            <label>
+              Read-only directories <small>one per line</small>
+              <textarea
+                rows={2}
+                value={form.dirs}
+                onChange={(e) => set("dirs", e.target.value)}
+                placeholder="~/.aws"
+              />
+            </label>
+          </>
+        )}
+        {isCommand && (
           <>
             <label>
               Command
@@ -115,7 +170,8 @@ export default function ServerDialog({ editing, onSubmit, onCancel }: Props) {
               <input value={form.cwd} onChange={(e) => set("cwd", e.target.value)} />
             </label>
           </>
-        ) : (
+        )}
+        {form.kind === "url" && (
           <>
             <label>
               URL

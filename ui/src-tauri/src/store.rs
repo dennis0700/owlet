@@ -1,10 +1,10 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, bail};
-use owlet::{Config, ServerConfig};
+use owlet::{Config, Plugin, ServerConfig};
 use serde::Serialize;
 
 /// How a draft entry differs from the config file.
@@ -24,6 +24,17 @@ pub struct Entry {
     pub status: Status,
 }
 
+/// One catalog plugin as shown in the UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PluginInfo {
+    pub name: &'static str,
+    pub description: &'static str,
+    /// The plugin file exists in the plugins directory.
+    pub installed: bool,
+    /// Draft server entry running the plugin, if any.
+    pub server: Option<String>,
+}
+
 /// Everything the UI needs to render.
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
@@ -33,6 +44,7 @@ pub struct Snapshot {
     /// True when the draft differs from the config file (including deletions).
     pub dirty: bool,
     pub entries: Vec<Entry>,
+    pub plugins: Vec<PluginInfo>,
 }
 
 /// In-memory draft of the `[servers]` table, written out only by [`Store::save`].
@@ -42,6 +54,8 @@ pub struct Store {
     saved: BTreeMap<String, ServerConfig>,
     draft: BTreeMap<String, ServerConfig>,
     load_error: Option<String>,
+    /// Plugins uninstalled in the current draft; Save deletes their files.
+    pending_uninstall: BTreeSet<&'static str>,
 }
 
 impl Store {
@@ -59,6 +73,7 @@ impl Store {
             saved: BTreeMap::new(),
             draft: BTreeMap::new(),
             load_error: None,
+            pending_uninstall: BTreeSet::new(),
         };
         store.reload();
         store
@@ -72,6 +87,7 @@ impl Store {
     /// store.reload();
     /// ```
     pub fn reload(&mut self) {
+        self.pending_uninstall.clear();
         match Config::load_servers(&self.path) {
             Ok(servers) => {
                 self.saved = servers.clone();
@@ -112,7 +128,73 @@ impl Store {
             load_error: self.load_error.clone(),
             dirty: self.draft != self.saved,
             entries,
+            plugins: self.plugins(),
         }
+    }
+
+    /// Catalog plugins with their install state and draft server entry.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let plugins = store.plugins();
+    /// ```
+    pub fn plugins(&self) -> Vec<PluginInfo> {
+        let dir = Plugin::dir(&self.path).ok();
+        Plugin::catalog()
+            .iter()
+            .map(|p| PluginInfo {
+                name: p.name,
+                description: p.description,
+                installed: dir.as_deref().is_some_and(|d| p.file(d).exists()),
+                server: dir
+                    .as_deref()
+                    .and_then(|d| p.server_name(d, &self.draft))
+                    .map(str::to_owned),
+            })
+            .collect()
+    }
+
+    /// Directory plugins are installed into; fails while the config cannot be edited.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let dir = store.plugins_dir()?;
+    /// ```
+    pub fn plugins_dir(&self) -> anyhow::Result<PathBuf> {
+        self.editable()?;
+        Plugin::dir(&self.path)
+    }
+
+    /// Adds the server entry for an installed plugin to the draft (an entry
+    /// already running it is kept).
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// store.install_plugin(Plugin::find("aws-mcp")?)?;
+    /// ```
+    pub fn install_plugin(&mut self, plugin: &Plugin) -> anyhow::Result<()> {
+        let dir = self.plugins_dir()?;
+        plugin.add_server(&dir, &mut self.draft)
+    }
+
+    /// Removes the plugin's server entries from the draft; its file is deleted
+    /// by [`Store::save`].
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// store.uninstall_plugin(Plugin::find("aws-mcp")?)?;
+    /// ```
+    pub fn uninstall_plugin(&mut self, plugin: &Plugin) -> anyhow::Result<()> {
+        let dir = self.plugins_dir()?;
+        if plugin.remove_servers(&dir, &mut self.draft).is_empty() {
+            bail!("plugin `{}` has no server entry", plugin.name);
+        }
+        self.pending_uninstall.insert(plugin.name);
+        Ok(())
     }
 
     /// Path of the config file.
@@ -198,7 +280,9 @@ impl Store {
             .with_context(|| format!("server `{name}` not found"))
     }
 
-    /// Writes the draft to the config file, keeping comments and other keys.
+    /// Writes the draft to the config file, keeping comments and other keys,
+    /// then deletes the files of plugins uninstalled in this draft that the
+    /// saved config no longer runs.
     ///
     /// # Examples
     ///
@@ -209,6 +293,17 @@ impl Store {
         self.editable()?;
         Config::persist_servers(&self.path, &self.draft)?;
         self.saved = self.draft.clone();
+        let pending = std::mem::take(&mut self.pending_uninstall);
+        // The config is already saved; a leftover plugin file is harmless, so
+        // cleanup failures are ignored instead of reporting Save as failed.
+        if let Ok(dir) = Plugin::dir(&self.path) {
+            for plugin in Plugin::catalog() {
+                if pending.contains(plugin.name) && plugin.server_name(&dir, &self.saved).is_none()
+                {
+                    let _ = plugin.uninstall(&dir);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -332,5 +427,96 @@ mod tests {
         s.upsert(None, "a", cmd("x")).expect("add");
         s.save().expect("save");
         assert!(Config::load_servers(&path).expect("load").contains_key("a"));
+    }
+
+    fn aws() -> &'static Plugin {
+        Plugin::find("aws-mcp").expect("catalog")
+    }
+
+    fn fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/aws-mcp.wasm")
+    }
+
+    #[test]
+    fn installed_plugin_joins_the_draft() {
+        let (_dir, mut s) = store("[servers.a]\ncommand = \"x\"\n");
+        let info = &s.snapshot().plugins[0];
+        assert_eq!(
+            (info.name, info.installed, info.server.as_deref()),
+            ("aws-mcp", false, None)
+        );
+
+        let dir = s.plugins_dir().expect("dir");
+        aws().install_file(&dir, &fixture()).expect("install");
+        s.install_plugin(aws()).expect("add to draft");
+        let snap = s.snapshot();
+        assert!(snap.dirty);
+        assert_eq!(status(&s, "aws-mcp"), Some(Status::Added));
+        assert!(snap.plugins[0].installed);
+        assert_eq!(snap.plugins[0].server.as_deref(), Some("aws-mcp"));
+
+        // Installing again keeps the (edited) entry.
+        s.set_enabled("aws-mcp", false).expect("toggle");
+        s.install_plugin(aws()).expect("again");
+        assert!(
+            !s.snapshot()
+                .entries
+                .iter()
+                .any(|e| e.name == "aws-mcp" && e.server.enabled)
+        );
+
+        s.save().expect("save");
+        let saved = Config::load_servers(s.path()).expect("load");
+        assert_eq!(saved["aws-mcp"].wasm, Some(aws().file(&dir)));
+        assert!(aws().file(&dir).exists());
+    }
+
+    #[test]
+    fn uninstall_deletes_the_file_only_on_save() {
+        let (_dir, mut s) = store("");
+        let dir = s.plugins_dir().expect("dir");
+        aws().install_file(&dir, &fixture()).expect("install");
+        s.install_plugin(aws()).expect("add");
+        s.save().expect("save");
+
+        s.uninstall_plugin(aws()).expect("uninstall");
+        assert!(s.uninstall_plugin(aws()).is_err());
+        assert_eq!(status(&s, "aws-mcp"), None);
+        assert!(aws().file(&dir).exists(), "file stays until Save");
+
+        s.reload();
+        assert_eq!(status(&s, "aws-mcp"), Some(Status::Unchanged));
+        s.uninstall_plugin(aws()).expect("uninstall");
+        s.save().expect("save");
+        assert!(!aws().file(&dir).exists());
+        assert!(!s.snapshot().plugins[0].installed);
+        assert!(Config::load_servers(s.path()).expect("load").is_empty());
+    }
+
+    #[test]
+    fn save_keeps_plugin_files_not_uninstalled_in_the_draft() {
+        let (_dir, mut s) = store("");
+        let dir = s.plugins_dir().expect("dir");
+        aws().install_file(&dir, &fixture()).expect("install");
+
+        // No entry runs the file: an unrelated Save keeps it.
+        s.upsert(None, "a", cmd("x")).expect("add");
+        s.save().expect("save");
+        assert!(aws().file(&dir).exists());
+
+        // An entry using a non-canonical path to the file: Save keeps it.
+        let mut odd = aws().server_config(&dir);
+        odd.wasm = Some(dir.join(".").join("aws-mcp.wasm"));
+        s.upsert(None, "odd", odd).expect("add odd");
+        s.save().expect("save");
+        assert!(aws().file(&dir).exists());
+
+        // Uninstall then Reload discards the pending deletion.
+        s.install_plugin(aws()).expect("add");
+        s.save().expect("save");
+        s.uninstall_plugin(aws()).expect("uninstall");
+        s.reload();
+        s.save().expect("save");
+        assert!(aws().file(&dir).exists());
     }
 }

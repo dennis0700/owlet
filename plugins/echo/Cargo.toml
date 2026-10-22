@@ -1,0 +1,19 @@
+[package]
+name = "owlet-plugin-echo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Minimal plugin used to prove the owlet WASM host pipeline end to end.
+# Built independently of the owlet workspace; targets wasm32-wasip2.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46.0"
+serde_json = "1.0.151"
+
+[profile.release]
+opt-level = "s"
+strip = true

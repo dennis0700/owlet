@@ -14,6 +14,10 @@ export const upsertServer = (
 ) => invoke<Snapshot>("upsert_server", { oldName, name, server });
 export const deleteServer = (name: string) =>
   invoke<Snapshot>("delete_server", { name });
+export const installPlugin = (name: string) =>
+  invoke<Snapshot>("install_plugin", { name });
+export const uninstallPlugin = (name: string) =>
+  invoke<Snapshot>("uninstall_plugin", { name });
 
 export const serverStatus = () => invoke<ServerStatus>("server_status");
 export const startServer = () => invoke<ServerStatus>("start_server");

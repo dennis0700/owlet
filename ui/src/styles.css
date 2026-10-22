@@ -78,6 +78,8 @@ button.ok, button.ok:disabled { color: var(--ok); border-color: var(--ok); opaci
 .title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag { flex-shrink: 0; }
+.section-title { font-size: 15px; margin: 20px 0 8px; }
+.description { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
 .tag { font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
 .tag.added { color: var(--ok); border-color: var(--ok); }
 .tag.modified { color: var(--accent); border-color: var(--accent); }

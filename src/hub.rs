@@ -632,10 +632,11 @@ impl Hub {
 }
 
 fn transport_name(sc: &ServerConfig) -> &'static str {
-    match (&sc.url, sc.transport.unwrap_or_default()) {
-        (None, _) => "stdio",
-        (Some(_), RemoteTransport::Http) => "http",
-        (Some(_), RemoteTransport::Sse) => "sse",
+    match (&sc.url, &sc.wasm, sc.transport.unwrap_or_default()) {
+        (Some(_), _, RemoteTransport::Http) => "http",
+        (Some(_), _, RemoteTransport::Sse) => "sse",
+        (None, Some(_), _) => "wasm",
+        (None, None, _) => "stdio",
     }
 }
 
@@ -668,9 +669,9 @@ fn spawn_spec(name: &str, sc: &ServerConfig, project: Option<&Path>) -> SpawnSpe
         })
         .collect();
     let cwd = project.map(Path::to_path_buf).or_else(|| sc.cwd.clone());
-    // Config validation guarantees exactly one of `command` / `url`.
-    let transport = match (&sc.command, &sc.url) {
-        (_, Some(url)) => match sc.transport.unwrap_or_default() {
+    // Config validation guarantees exactly one of `command` / `url` / `wasm`.
+    let transport = match (&sc.command, &sc.url, &sc.wasm) {
+        (_, Some(url), _) => match sc.transport.unwrap_or_default() {
             RemoteTransport::Http => Transport::StreamableHttp {
                 url: url.clone(),
                 headers: sc.headers.clone(),
@@ -680,7 +681,14 @@ fn spawn_spec(name: &str, sc: &ServerConfig, project: Option<&Path>) -> SpawnSpe
                 headers: sc.headers.clone(),
             },
         },
-        (command, None) => Transport::Stdio {
+        (_, None, Some(path)) => Transport::Wasm {
+            path: path.clone(),
+            args,
+            env: sc.env.clone(),
+            inherit_env: sc.inherit_env.clone(),
+            dirs: sc.dirs.clone(),
+        },
+        (command, None, None) => Transport::Stdio {
             command: command.clone().unwrap_or_default(),
             args,
             env: sc.env.clone(),

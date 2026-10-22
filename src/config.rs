@@ -67,6 +67,9 @@ pub struct ServerConfig {
     /// Executable for a stdio server.
     #[serde(default)]
     pub command: Option<String>,
+    /// Path to a `.wasm` component for a WASM plugin server.
+    #[serde(default)]
+    pub wasm: Option<PathBuf>,
     /// Remote server URL: the MCP endpoint for `http`, the `GET /sse` stream for `sse`.
     #[serde(default)]
     pub url: Option<String>,
@@ -77,10 +80,21 @@ pub struct ServerConfig {
     #[serde(default)]
     pub headers: HashMap<String, String>,
     /// Arguments; `{project}` is replaced by the project path for `scope = "project"`.
+    /// For `wasm` servers they become the plugin's WASI argv (after the server name).
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment variables; for `wasm` servers the plugin's whole WASI environment
+    /// together with `inherit_env`.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// `wasm` only: host environment variables forwarded into the plugin. An entry
+    /// ending in `*` is a prefix match (`AWS_*`); `env` wins over inherited values.
+    #[serde(default)]
+    pub inherit_env: Vec<String>,
+    /// `wasm` only: host directories preopened read-only at the same guest path.
+    /// A leading `~/` expands to `$HOME`; missing directories are skipped.
+    #[serde(default)]
+    pub dirs: Vec<PathBuf>,
     /// Working directory for `shared`/`session` scope.
     #[serde(default)]
     pub cwd: Option<PathBuf>,
@@ -103,10 +117,15 @@ impl ServerConfig {
     /// server.check()?;
     /// ```
     pub fn check(&self) -> anyhow::Result<()> {
-        match (&self.command, &self.url) {
-            (Some(_), Some(_)) => bail!("set either `command` or `url`, not both"),
-            (None, None) => bail!("missing `command` or `url`"),
-            (Some(cmd), None) => {
+        if self.wasm.is_none() && (!self.inherit_env.is_empty() || !self.dirs.is_empty()) {
+            bail!("`inherit_env` and `dirs` only apply to `wasm` servers");
+        }
+        match (&self.command, &self.url, &self.wasm) {
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                bail!("set exactly one of `command`, `url` or `wasm`")
+            }
+            (None, None, None) => bail!("missing `command`, `url` or `wasm`"),
+            (Some(cmd), None, None) => {
                 if cmd.trim().is_empty() {
                     bail!("empty command");
                 }
@@ -114,14 +133,28 @@ impl ServerConfig {
                     bail!("`headers` and `transport` only apply to `url` servers");
                 }
             }
-            (None, Some(url)) => {
+            (None, None, Some(path)) => {
+                if path.as_os_str().is_empty() {
+                    bail!("empty wasm path");
+                }
+                if !self.headers.is_empty() || self.transport.is_some() {
+                    bail!("`headers` and `transport` only apply to `url` servers");
+                }
+                if self.scope == Scope::Project {
+                    bail!("scope = \"project\" needs a local process; use `command`");
+                }
+                if self.cwd.is_some() {
+                    bail!("`cwd` does not apply to `wasm` servers; use `dirs`");
+                }
+            }
+            (None, Some(url), None) => {
                 let parsed =
                     reqwest::Url::parse(url).with_context(|| format!("invalid url `{url}`"))?;
                 if !matches!(parsed.scheme(), "http" | "https") {
                     bail!("url must be http(s): `{url}`");
                 }
                 if !self.args.is_empty() || !self.env.is_empty() || self.cwd.is_some() {
-                    bail!("`args`, `env` and `cwd` only apply to `command` servers");
+                    bail!("`args`, `env` and `cwd` do not apply to `url` servers");
                 }
                 if self.scope == Scope::Project {
                     bail!("scope = \"project\" needs a local process; use `command`");
@@ -369,6 +402,12 @@ fn write_server(t: &mut dyn toml_edit::TableLike, s: &ServerConfig) -> anyhow::R
 
     put(t, "enabled", (!s.enabled).then_some(Value::from(false)));
     put(t, "command", s.command.as_deref().map(Value::from));
+    let wasm = s
+        .wasm
+        .as_deref()
+        .map(|p| p.to_str().context("wasm path is not valid UTF-8"))
+        .transpose()?;
+    put(t, "wasm", wasm.map(Value::from));
     put(t, "url", s.url.as_deref().map(Value::from));
     let transport = s.transport.map(|tr| match tr {
         RemoteTransport::Http => "http",
@@ -386,6 +425,21 @@ fn write_server(t: &mut dyn toml_edit::TableLike, s: &ServerConfig) -> anyhow::R
     });
     put(t, "args", args);
     put(t, "env", inline(&s.env));
+    let inherit_env = (!s.inherit_env.is_empty()).then(|| {
+        Value::Array(
+            s.inherit_env
+                .iter()
+                .map(String::as_str)
+                .collect::<toml_edit::Array>(),
+        )
+    });
+    put(t, "inherit_env", inherit_env);
+    let dirs = s
+        .dirs
+        .iter()
+        .map(|p| p.to_str().context("dirs entry is not valid UTF-8"))
+        .collect::<anyhow::Result<toml_edit::Array>>()?;
+    put(t, "dirs", (!dirs.is_empty()).then_some(Value::Array(dirs)));
     let cwd = s
         .cwd
         .as_deref()
@@ -552,6 +606,65 @@ mod tests {
     }
 
     #[test]
+    fn parses_wasm_servers() {
+        let cfg = Config::parse(
+            r#"
+            [servers.echo]
+            wasm = "/plugins/echo.wasm"
+
+            [servers.off]
+            wasm = "/plugins/x.wasm"
+            enabled = false
+            scope = "session"
+
+            [servers.aws]
+            wasm = "/plugins/aws-mcp.wasm"
+            args = ["https://aws-mcp.us-east-1.api.aws/mcp", "--metadata", "AWS_REGION=us-west-2"]
+            env = { AWS_PROFILE = "dev" }
+            inherit_env = ["AWS_*", "HOME"]
+            dirs = ["~/.aws"]
+            "#,
+        )
+        .expect("valid config");
+        assert_eq!(
+            cfg.servers["echo"].wasm.as_deref(),
+            Some(std::path::Path::new("/plugins/echo.wasm"))
+        );
+        assert!(cfg.servers["echo"].command.is_none());
+        assert!(!cfg.servers["off"].enabled);
+        assert_eq!(cfg.servers["off"].scope, Scope::Session);
+        let aws = &cfg.servers["aws"];
+        assert_eq!(aws.args.len(), 3);
+        assert_eq!(aws.env["AWS_PROFILE"], "dev");
+        assert_eq!(aws.inherit_env, ["AWS_*", "HOME"]);
+        assert_eq!(aws.dirs, [PathBuf::from("~/.aws")]);
+    }
+
+    #[test]
+    fn round_trips_wasm_capabilities() {
+        let text = "[servers.aws]\nwasm = \"/p.wasm\"\nargs = [\"https://h/mcp\"]\n\
+                    env = { K = \"v\" }\ninherit_env = [\"AWS_*\"]\ndirs = [\"~/.aws\", \"/etc/x\"]\n";
+        let servers: BTreeMap<_, _> = Config::parse(text)
+            .expect("parse")
+            .servers
+            .into_iter()
+            .collect();
+        let out = apply_servers("", &servers).expect("apply");
+        assert!(out.contains("inherit_env = [\"AWS_*\"]"));
+        assert!(out.contains("dirs = [\"~/.aws\", \"/etc/x\"]"));
+        assert_eq!(
+            Config::parse(&out).expect("reparse").servers["aws"],
+            servers["aws"]
+        );
+
+        let mut plain = servers["aws"].clone();
+        plain.inherit_env.clear();
+        plain.dirs.clear();
+        let out = apply_servers("", &BTreeMap::from([("aws".to_owned(), plain)])).expect("apply");
+        assert!(!out.contains("inherit_env") && !out.contains("dirs"));
+    }
+
+    #[test]
     fn rejects_bad_input() {
         assert!(Config::parse("[servers.x]\ncommand = \"\"").is_err());
         assert!(Config::parse("[servers.x]\ncommand = \"a\"\nbogus = 1").is_err());
@@ -563,6 +676,17 @@ mod tests {
         assert!(Config::parse("[servers.x]\nurl = \"http://h/sse\"\nscope = \"project\"").is_err());
         assert!(Config::parse("[servers.x]\nurl = \"http://h/sse\"\nargs = [\"a\"]").is_err());
         assert!(Config::parse("[servers.x]\ncommand = \"a\"\nheaders = { A = \"b\" }").is_err());
+        assert!(Config::parse("[servers.x]\ncommand = \"a\"\nwasm = \"/p.wasm\"").is_err());
+        assert!(Config::parse("[servers.x]\nwasm = \"/p.wasm\"\nurl = \"http://h/mcp\"").is_err());
+        assert!(Config::parse("[servers.x]\nwasm = \"/p.wasm\"\nscope = \"project\"").is_err());
+        assert!(Config::parse("[servers.x]\nwasm = \"/p.wasm\"\ntransport = \"sse\"").is_err());
+        assert!(Config::parse("[servers.x]\nwasm = \"/p.wasm\"\ncwd = \"/tmp\"").is_err());
+        assert!(Config::parse("[servers.x]\ncommand = \"a\"\ninherit_env = [\"A\"]").is_err());
+        assert!(Config::parse("[servers.x]\ncommand = \"a\"\ndirs = [\"/tmp\"]").is_err());
+        assert!(Config::parse("[servers.x]\nurl = \"http://h/mcp\"\ndirs = [\"/tmp\"]").is_err());
+        assert!(
+            Config::parse("[servers.x]\nurl = \"http://h/mcp\"\ninherit_env = [\"A\"]").is_err()
+        );
         let cfg = Config::parse("listen = \"0.0.0.0:1\"").expect("parses");
         assert!(cfg.validate().is_err());
     }

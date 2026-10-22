@@ -1,0 +1,26 @@
+[package]
+name = "owlet-plugin-aws-mcp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# owlet WASM plugin: a SigV4-signing MCP Streamable HTTP proxy, the Rust
+# counterpart of `uvx mcp-proxy-for-aws <endpoint>`. Built independently of the
+# owlet workspace; targets wasm32-wasip2. `rlib` lets `cargo test` run the pure
+# logic on the host target.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.104"
+hmac = "0.13.0"
+serde_json = "1.0.151"
+sha1_smol = "=1.0.1"
+sha2 = "0.11.0"
+url = "2.5.8"
+wit-bindgen = "0.46.0"
+
+[profile.release]
+opt-level = "s"
+strip = true

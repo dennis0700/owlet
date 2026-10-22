@@ -14,7 +14,7 @@ use tauri::{Emitter, Manager};
 
 pub use commands::AppState;
 pub use server::{ServerState, ServerStatus};
-pub use store::{Entry, Snapshot, Status, Store};
+pub use store::{Entry, PluginInfo, Snapshot, Status, Store};
 pub use updater::{PendingUpdate, UpdateInfo};
 
 /// Environment variable overriding the config file path.
@@ -59,6 +59,8 @@ pub fn run() -> anyhow::Result<()> {
             commands::upsert_server,
             commands::delete_server,
             commands::save,
+            commands::install_plugin,
+            commands::uninstall_plugin,
             commands::reload,
             commands::server_status,
             commands::start_server,

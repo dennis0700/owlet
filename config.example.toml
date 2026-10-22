@@ -17,6 +17,45 @@ command = "codegraph"
 args = ["serve", "--mcp"]
 scope = "project"
 
+# WASM plugin: a WebAssembly component (exporting `handle` and `on-shutdown`)
+# loaded in-process. No external runtime needed; `scope` may be "shared" or "session".
+[servers.echo]
+wasm = "~/.config/owlet/plugins/echo.wasm"
+
+# AWS MCP via the aws-mcp plugin, replacing
+# `uvx mcp-proxy-for-aws@1.6.3 https://aws-mcp.us-east-1.api.aws/mcp --metadata AWS_REGION=us-west-2`.
+# A plugin only gets what is granted here: WASI argv (`args`), environment
+# (`env` plus host variables matched by `inherit_env`) and read-only `dirs`.
+# Its only network access is owlet's HTTP import; WASI sockets stay disabled.
+# That import reaches any http(s) URL, so only load plugins you trust.
+# An instance handles one message at a time; "session" scope avoids queueing
+# clients behind each other's slow calls.
+# Credentials: env keys or `~/.aws` profiles (static keys, role_arn with
+# source_profile / credential_source = Environment, web_identity_token_file,
+# SSO via the `aws sso login` cache; the SSO cache and the token file must be
+# inside `dirs`). credential_process, mfa_serial, profile-less web identity,
+# ECS container credentials and IMDS are not supported.
+# Add "--read-only" to expose only read-only tools, and "--profile", "a", "b"
+# (or AWS_MCP_PROXY_PROFILES="a b") to let auth tools take an `aws_profile` argument.
+# `owlet plugin install aws-mcp` downloads the plugin and adds this entry for you.
+# [servers.aws-mcp]
+# wasm = "~/.config/owlet/plugins/aws-mcp.wasm"
+# args = ["https://aws-mcp.us-east-1.api.aws/mcp", "--metadata", "AWS_REGION=us-west-2"]
+# inherit_env = [
+#     "AWS_ACCESS_KEY_ID",
+#     "AWS_SECRET_ACCESS_KEY",
+#     "AWS_SESSION_TOKEN",
+#     "AWS_PROFILE",
+#     "AWS_REGION",
+#     "AWS_DEFAULT_REGION",
+#     "AWS_CONFIG_FILE",
+#     "AWS_SHARED_CREDENTIALS_FILE",
+#     "AWS_MCP_PROXY_PROFILES",
+#     "HOME",
+# ]
+# dirs = ["~/.aws"]
+# scope = "session"
+
 # Remote servers: owlet connects as a client; clients of owlet still use plain JSON.
 # `scope` may be "shared" or "session" (not "project").
 

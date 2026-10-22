@@ -1,10 +1,12 @@
-mod update;
-
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use owlet::{AdminClient, Config, Hub};
+use owlet::{AdminClient, Config, Hub, Plugin};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -39,6 +41,28 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// Install, list and remove WASM plugins (stored in `plugins/` next to the config).
+    #[command(subcommand)]
+    Plugin(PluginCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginCmd {
+    /// Show the plugin catalog with install and enable state.
+    List,
+    /// Install a plugin and add its `[servers.<name>]` entry.
+    Install {
+        /// Plugin name from `owlet plugin list`.
+        name: String,
+        /// Install this local `.wasm` instead of downloading the release asset.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Remove a plugin's server entries and its file.
+    Uninstall {
+        /// Plugin name from `owlet plugin list`.
+        name: String,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -63,11 +87,12 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Status { json } => AdminClient::from_config(&path)?.status(json).await,
         Cmd::Enable(t) => toggle(&path, t, true).await,
         Cmd::Disable(t) => toggle(&path, t, false).await,
-        Cmd::Update { check } => update::run(check).await,
+        Cmd::Update { check } => owlet::self_update(check).await,
+        Cmd::Plugin(cmd) => plugin(&path, cmd).await,
     }
 }
 
-async fn toggle(path: &std::path::Path, t: Toggle, enabled: bool) -> anyhow::Result<()> {
+async fn toggle(path: &Path, t: Toggle, enabled: bool) -> anyhow::Result<()> {
     let admin = AdminClient::from_config(path)?;
     let mut failed = false;
     for server in &t.servers {
@@ -78,6 +103,50 @@ async fn toggle(path: &std::path::Path, t: Toggle, enabled: bool) -> anyhow::Res
     }
     if failed {
         anyhow::bail!("some servers could not be updated");
+    }
+    Ok(())
+}
+
+async fn plugin(path: &Path, cmd: PluginCmd) -> anyhow::Result<()> {
+    let dir = Plugin::dir(path)?;
+    let mut servers = Config::load_servers(path)?;
+    match cmd {
+        PluginCmd::List => {
+            for p in Plugin::catalog() {
+                let enabled = |name: &str| servers.get(name).is_some_and(|s| s.enabled);
+                let state = match p.server_name(&dir, &servers) {
+                    _ if !p.file(&dir).exists() => "not installed".to_owned(),
+                    Some(name) if enabled(name) => format!("installed, [servers.{name}]"),
+                    Some(name) => format!("installed, [servers.{name}] disabled"),
+                    None => "installed, no server entry".to_owned(),
+                };
+                println!("{:<12} {state}\n{:<12} {}", p.name, "", p.description);
+            }
+        }
+        PluginCmd::Install { name, file } => {
+            let p = Plugin::find(&name)?;
+            // Fails on a conflicting entry before anything is written.
+            p.add_server(&dir, &mut servers)?;
+            let installed = match file {
+                Some(src) => p.install_file(&dir, &src)?,
+                None => p.install(&dir).await?,
+            };
+            Config::persist_servers(path, &servers)?;
+            let server = p.server_name(&dir, &servers).unwrap_or(p.name);
+            println!("installed {} as [servers.{server}]", installed.display());
+            println!("restart a running owlet to apply");
+        }
+        PluginCmd::Uninstall { name } => {
+            let p = Plugin::find(&name)?;
+            let removed = p.remove_servers(&dir, &mut servers);
+            Config::persist_servers(path, &servers)?;
+            p.uninstall(&dir)?;
+            for server in &removed {
+                println!("removed [servers.{server}]");
+            }
+            println!("removed {}", p.file(&dir).display());
+            println!("restart a running owlet to apply");
+        }
     }
     Ok(())
 }

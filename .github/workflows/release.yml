@@ -52,11 +52,58 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            plugins/aws
+
+      - name: Rebuild aws-mcp fixture from source
+        working-directory: plugins/aws
+        run: |
+          cargo build --locked --release --target wasm32-wasip2
+          cp target/wasm32-wasip2/release/owlet_plugin_aws_mcp.wasm ../../tests/fixtures/aws-mcp.wasm
 
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+
+      - name: Test aws-mcp plugin
+        working-directory: plugins/aws
+        run: cargo test --locked
+
+  build-plugins:
+    name: plugins (wasm32-wasip2)
+    needs: check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/aws
+
+      - name: Build aws-mcp
+        working-directory: plugins/aws
+        run: cargo build --locked --release --target wasm32-wasip2
+
+      - name: Package
+        run: |
+          name=owlet-plugin-aws-mcp.wasm
+          mkdir -p dist-plugins
+          cp plugins/aws/target/wasm32-wasip2/release/owlet_plugin_aws_mcp.wasm "dist-plugins/${name}"
+          (cd dist-plugins && sha256sum "${name}" > "${name}.sha256")
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: owlet-plugins
+          path: dist-plugins/*
+          if-no-files-found: error
 
   build-linux:
     name: build (${{ matrix.target }})
@@ -153,6 +200,12 @@ jobs:
         working-directory: ui
         run: npm ci
 
+      # Before the signed build, so a failure stops the job early. Debug builds
+      # load the UI from devUrl, so no frontend dist is needed here.
+      - name: Test
+        working-directory: ui/src-tauri
+        run: cargo test --locked --target ${{ env.TARGET }}
+
       - name: Build
         working-directory: ui
         env:
@@ -200,7 +253,7 @@ jobs:
           ./owlet-*/owlet --help > /dev/null
 
   release:
-    needs: [smoke, build-ui]
+    needs: [smoke, build-ui, build-plugins]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -231,6 +284,7 @@ jobs:
             dist/*.tar.gz
             dist/*.dmg
             dist/*.sig
+            dist/*.wasm
             dist/*.sha256
             dist/latest.json
           generate_release_notes: true

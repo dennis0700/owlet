@@ -160,6 +160,9 @@ cargo install --locked --git https://github.com/dennis0700/owlet
 | `url` | 远程 | | server 地址。`transport = "sse"` 时填 SSE 流的地址。 |
 | `transport` | 远程 | `"http"` | `"http"` 表示 Streamable HTTP，`"sse"` 表示旧版 2024-11-05 HTTP+SSE。 |
 | `headers` | 远程 | `{}` | 发给上游的 HTTP header，例如 `Authorization`。 |
+| `wasm` | wasm | | WASM component 插件的路径（见 [WASM 插件](#wasm-插件)）。 |
+| `inherit_env` | wasm | `[]` | 转发给插件的宿主环境变量；`PREFIX*` 表示前缀匹配。`env` 优先。 |
+| `dirs` | wasm | `[]` | 插件可读的宿主目录（只读，路径不变；`~/` 展开为 `$HOME`）。 |
 | `scope` | 全部 | `"shared"` | 客户端之间如何共享 server（见下文）。 |
 | `idle_timeout` | 全部 | 全局值 | 单独为这个 server 覆盖全局值。 |
 | `cache_lists` | 全部 | `true` | 缓存 `tools/list`、`prompts/list`、`resources/list` 和 `resources/templates/list` 的结果。 |
@@ -203,6 +206,53 @@ transport = "sse"
 
 远程 server 也支持多实例，但不能用 `project` scope，因为没有本地进程可以设置 cwd。owlet 收不到远程 server 的 `list_changed` 通知，如果远程的工具列表经常变化，建议设置 `cache_lists = false`。
 
+### WASM 插件
+
+`wasm` server 是 owlet 在进程内运行的 WebAssembly component，不需要外部运行时。插件只能拿到显式授予的能力：`args` 作为 argv，`env` 加 `inherit_env` 作为环境变量，以及只读的 `dirs`。唯一的网络访问是 owlet 提供的 HTTP import，WASI socket 保持关闭。这个 import 可以访问任意 http(s) URL，包括 loopback 和 link-local 地址，所以请把插件当作可信代码。一个实例同一时间只处理一条消息：慢调用会拖住发往同一实例的其他请求，如果客户端之间不能互相等待，请使用 `scope = "session"`。`cwd` 和 `scope = "project"` 不适用。
+
+```toml
+# 替代 `uvx mcp-proxy-for-aws https://aws-mcp.us-east-1.api.aws/mcp --metadata AWS_REGION=us-west-2`
+[servers.aws-mcp]
+wasm = "~/.config/owlet/plugins/aws-mcp.wasm"
+args = ["https://aws-mcp.us-east-1.api.aws/mcp", "--metadata", "AWS_REGION=us-west-2"]
+inherit_env = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_MCP_PROXY_PROFILES",
+    "HOME",
+]
+dirs = ["~/.aws"]
+scope = "session"
+```
+
+插件导出 `handle` 和 `on-shutdown`（见 `wit/mcp-plugin.wit`）。空闲实例停止时，owlet 会调用 `on-shutdown` 并给它 2 秒（包括 HTTP），让插件做清理（aws-mcp 会发送 session `DELETE`）；在调用中途被停止的实例会直接中断，不会调用它。在 `on-shutdown` 出现之前构建的 component 仍能安装，但启动会失败，请重新构建或重新安装。
+
+aws-mcp 插件用 SigV4 签名请求。凭证来自 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`，或 `~/.aws` 里的 profile（`--profile` 或 `AWS_PROFILE`）。支持的 profile 类型：静态密钥；`role_arn` 配合 `source_profile` 或 `credential_source = Environment`（STS AssumeRole）；`role_arn` 配合 `web_identity_token_file`；IAM Identity Center（`sso_session` 或旧式 `sso_start_url`）。临时凭证会缓存到过期前 5 分钟。SSO 使用 `aws sso login` 缓存在 `~/.aws/sso/cache` 下的 token，所以这个目录必须位于授予的 `dirs` 条目之内（例如 `~/.aws`）；插件无法刷新 token（dirs 是只读的），过期后请重新执行 `aws sso login`。`web_identity_token_file` 同样必须位于授予的 `dirs` 条目之内（例如 EKS 上的 `/var/run/secrets/eks.amazonaws.com/serviceaccount`）。profile 的配置项同时从 `~/.aws/config` 和 `~/.aws/credentials` 读取，与 AWS CLI 一样以后者为准。不支持 `credential_process`（WASI 无法启动进程）和 `mfa_serial`，也不支持不带 profile、仅靠 `AWS_ROLE_ARN`/`AWS_WEB_IDENTITY_TOKEN_FILE` 的 web identity、容器（ECS）凭证和 EC2 实例元数据（IMDS）。
+
+其他选项与 `mcp-proxy-for-aws` 一致：
+
+- `--read-only` 只列出并允许带 `readOnlyHint: true` 标注的工具。
+- `--profile a b c`（或 `AWS_MCP_PROXY_PROFILES="a b c"`，后者优先）允许多个 profile，第一个是默认 profile。与 `mcp-proxy-for-aws` 一样，重复的 `--profile` 会替换之前的列表。此时认证类工具（`aws___call_aws`、`aws___run_script`、`aws___get_presigned_url`、`aws___get_tasks`、`aws___suggest_aws_commands`）接受可选的 `aws_profile` 参数，每个非默认 profile 使用独立的后端 session。每个 profile 的 `AWS_REGION` metadata 默认取 `AWS_REGION`/`AWS_DEFAULT_REGION`，其次是该 profile 的 `region`，再次是 endpoint 的 region；显式的 `--metadata AWS_REGION=...` 优先。
+
+#### 安装插件
+
+owlet 内置一个小的插件目录（目前只有 `aws-mcp`），不需要 uv/Python：
+
+```sh
+owlet plugin list
+owlet plugin install aws-mcp                      # 从与当前 owlet 版本对应的 release 下载
+owlet plugin install aws-mcp --file aws-mcp.wasm  # 或安装本地构建的文件
+owlet plugin uninstall aws-mcp
+```
+
+`install` 会校验 release 资产的 sha256，写入配置文件旁边的 `plugins/` 目录，并添加一条与上面类似的 `[servers.aws-mcp]`（已有的 `wasm` 条目保留原设置）。`uninstall` 删除该条目和文件。运行中的 owlet 需要重启才会生效。桌面 UI 的 Plugins 区域提供同样的操作和启用开关；在 UI 里改动先进入草稿，Save 后生效。
+
 ## CLI
 
 ```
@@ -211,6 +261,7 @@ owlet [-c <config>] status [--json]               查看 server 和运行中的�
 owlet [-c <config>] enable  <name>... [--persist] 在运行中的 owlet 上启用 server
 owlet [-c <config>] disable <name>... [--persist] 在运行中的 owlet 上停用 server
 owlet update [--check]                            更新到 GitHub 上的最新版本
+owlet [-c <config>] plugin list|install|uninstall 管理 WASM 插件（见上文）
 ```
 
 `status`、`enable`、`disable` 会从同一份配置文件读取 `listen` 和 `token`，然后连到正在运行的 owlet。

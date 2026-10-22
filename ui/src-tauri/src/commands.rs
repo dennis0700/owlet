@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use owlet::ServerConfig;
+use owlet::{Plugin, ServerConfig};
 use parking_lot::Mutex;
 use tauri::State;
 
@@ -70,6 +70,22 @@ pub fn upsert_server(
 #[tauri::command]
 pub fn delete_server(state: State<'_, AppState>, name: String) -> Result<Snapshot, String> {
     state.apply(|s| s.delete(&name))
+}
+
+/// Downloads the plugin from the matching GitHub release into the plugins
+/// directory and adds its server entry to the draft.
+#[tauri::command]
+pub async fn install_plugin(state: State<'_, AppState>, name: String) -> Result<Snapshot, String> {
+    let plugin = Plugin::find(&name).map_err(|e| format!("{e:#}"))?;
+    let dir = state.0.lock().plugins_dir().map_err(|e| format!("{e:#}"))?;
+    plugin.install(&dir).await.map_err(|e| format!("{e:#}"))?;
+    state.apply(|s| s.install_plugin(plugin))
+}
+
+/// Removes the plugin's server entries from the draft; Save deletes the file.
+#[tauri::command]
+pub fn uninstall_plugin(state: State<'_, AppState>, name: String) -> Result<Snapshot, String> {
+    state.apply(|s| s.uninstall_plugin(Plugin::find(&name)?))
 }
 
 #[tauri::command]

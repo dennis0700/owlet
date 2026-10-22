@@ -2,6 +2,9 @@ mod remote;
 mod sse;
 mod stdio;
 mod streamable;
+mod wasm;
+
+pub(crate) use self::wasm::{expand_home, validate as validate_wasm};
 
 use std::{
     collections::HashMap,
@@ -46,6 +49,18 @@ pub enum Transport {
     Sse {
         url: String,
         headers: HashMap<String, String>,
+    },
+    /// Load a WASM component plugin and speak MCP through its `handle` export.
+    Wasm {
+        path: PathBuf,
+        /// WASI argv after the program name.
+        args: Vec<String>,
+        /// Explicit WASI environment; wins over `inherit_env`.
+        env: HashMap<String, String>,
+        /// Host variable names (or `PREFIX*`) forwarded into the plugin.
+        inherit_env: Vec<String>,
+        /// Host directories preopened read-only at the same guest path.
+        dirs: Vec<PathBuf>,
     },
 }
 
@@ -243,6 +258,16 @@ impl Upstream {
             }
             Transport::Sse { url, headers } => {
                 sse::start(&spec.name, url, headers, wiring).await?;
+                None
+            }
+            Transport::Wasm {
+                path,
+                args,
+                env,
+                inherit_env,
+                dirs,
+            } => {
+                wasm::start(&spec.name, path, args, env, inherit_env, dirs, wiring).await?;
                 None
             }
         };

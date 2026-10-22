@@ -311,6 +311,26 @@ sequenceDiagram
     R-->>O: message 事件：tools/call 结果
 ```
 
+### WASM 插件（`wasm.rs`）
+
+- 插件是按 `wit/mcp-plugin.wit` 构建的 component：导出 `handle(request) -> string` 和 `on-shutdown()`，可以导入 `owlet:plugin/http`。返回值包含零条或多条以 `\n` 分隔的 JSON-RPC 消息，每条都像 stdio 的一行那样分发。导出没有命名为 `shutdown`，因为 wit-bindgen 会把 world 级函数导出为同名的 core 符号，与 libc 的 socket `shutdown` 冲突。校验和安装只检查内容是否为 component，所以没有 `on-shutdown` 的旧 component 能安装，但在实例化时失败。
+- wasmtime 的 `Store` 不是 `Send`，所以每个实例跑在独立的 OS 线程上，配一个 current-thread tokio runtime，同一时间只处理一条消息。只有两种情况会进入 runtime：等待下一条发出的消息，或者在同步的 `http.send` import 里执行 reqwest 请求（超时 100 秒，不跟随重定向，响应体上限 16 MiB）。`handle` 在 `block_on` 之外调用，因此 import 不会嵌套 runtime。
+- 停止可以打断正在执行的调用：等待消息和 import 都让请求与 `stop` 竞速（`biased`），进行中的 HTTP 交换会被放弃；共享 engine 开启了 epoch interruption（一个线程每 100 ms 推进一次 epoch），store 看到 `stop` 后 guest 代码会 trap。epoch 线程在第一个插件运行时才启动，所以 `owlet plugin install` 和 UI 校验不会创建线程。阻塞在 WASI host 调用里的 guest（例如经由同步 linker 的 `wasi:clocks` sleep 或 poll）在该调用返回前不会被打断。component 在 blocking 线程池里编译，并按路径和 mtime 缓存；每次新编译都会清掉文件已删除或已变更的缓存条目。
+- 如果循环在空闲时结束（两次调用之间收到 stop，或发出通道关闭），owlet 会调用 `on-shutdown`，宽限期 2 秒（`SHUTDOWN_GRACE`）：期间 `http.send` 以截止时间代替 `stop`，超过截止时间后 guest 代码会 trap。aws-mcp 借此对每个存活的后端 session 发送 `DELETE`。在调用中途被停止的实例不会调用 `on-shutdown`。
+- WASI context 只包含显式授予的能力：argv（server 名 + `args`）、环境变量（`inherit_env` 匹配到的变量再叠加 `env`）以及只读预打开的 `dirs`。WASI socket 和域名解析保持关闭，`http.send` 是唯一的出网途径。它没有目标限制（任意 http(s) URL），所以插件属于可信代码。
+
+```mermaid
+flowchart LR
+    C[MCP client] -->|Streamable HTTP| O[owlet]
+    O -->|handle| P[aws-mcp.wasm]
+    P -->|http.send import| R[owlet 内的 reqwest]
+    R -->|SigV4 签名的 HTTPS| A[AWS MCP endpoint]
+```
+
+- aws-mcp 插件（`plugins/aws`）通过 `http.send` 自行解析凭证：静态密钥、STS AssumeRole（`source_profile` 或 `credential_source = Environment`）、web identity，以及 `aws sso login` 缓存里的 SSO token（经 `dirs` 授权读取，不会刷新）。临时凭证缓存到过期前 5 分钟。`credential_process` 需要启动进程，`mfa_serial` 需要交互输入，所以两者都会报错。`--read-only` 按 `readOnlyHint` 过滤工具；配置多个 profile 时，认证类工具会多出 `aws_profile` 参数，每个非默认 profile 使用独立的后端 session，`on-shutdown` 也会删除这些 session。
+
+- `plugin.rs` 维护可安装的插件目录。`owlet plugin install`（以及 UI）从 GitHub release `v<owlet 版本>` 下载 `<asset>` 和 `<asset>.sha256`，确认内容能作为 component 加载后，原子写入 `<配置目录>/plugins/<name>.wasm`，并添加默认的 server 条目。
+
 ### SSE parser
 
 `remote::SseParser` 是一个增量式的 `text/event-stream` 解析器，能处理跨 chunk 的数据、LF 和 CRLF、注释行以及多行 `data:`，事件名缺省为 `message`。两种 HTTP transport 共用它。
@@ -384,7 +404,7 @@ flowchart LR
 1. `check`：确认 tag 与 `Cargo.toml`、`ui/src-tauri/Cargo.toml`、`ui/src-tauri/tauri.conf.json`、`ui/package.json` 里的版本一致，然后在 Linux 和 macOS 上运行 clippy（`-D warnings`）和测试。
 2. `build-linux`：用 `cargo zigbuild` 构建 `x86_64-unknown-linux-musl` 和 `aarch64-unknown-linux-musl`。Zig 的版本固定，下载后校验 sha256。构建完检查产物是否为静态链接。Zig 同时提供 `aws-lc-rs`（经由 rustls 引入）所需的 C 工具链，所以不需要 cmake。
 3. `build-macos`：在 `macos-15` 上构建 `aarch64-apple-darwin` 的 CLI。
-4. `build-ui`：在 `macos-15` 上构建 `aarch64-apple-darwin` 的 Tauri 桌面应用。应用包做 ad-hoc 签名，更新包（`.app.tar.gz`）用 secret `TAURI_SIGNING_PRIVATE_KEY` 里的 minisign 私钥签名。对应的公钥写在 `tauri.conf.json` 里，所以私钥丢失后，已安装的应用就无法再更新。
+4. `build-ui`：在 `macos-15` 上构建 `aarch64-apple-darwin` 的 Tauri 桌面应用。应用包做 ad-hoc 签名，更新包（`.app.tar.gz`）用 secret `TAURI_SIGNING_PRIVATE_KEY` 里的 minisign 私钥签名。构建完成后再运行 `ui/src-tauri` 的测试。对应的公钥写在 `tauri.conf.json` 里，所以私钥丢失后，已安装的应用就无法再更新。
 5. `smoke`：在各架构对应的原生 runner（`ubuntu-24.04`、`ubuntu-24.04-arm`、`macos-15`）上运行打包好的 CLI 二进制。
 6. `release`：生成 `latest.json`（桌面应用检查更新时读取的清单），然后把 CLI 的 tar 包、`.dmg`、签名的更新包和 `.sha256` 文件上传到 GitHub Release，tag 中带 `-` 的标记为 prerelease。
 

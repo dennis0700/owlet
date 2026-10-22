@@ -1,0 +1,54 @@
+package owlet:plugin@0.1.0;
+
+/// Outbound HTTP, performed by owlet on behalf of the plugin.
+///
+/// This is the only network access a plugin gets: WASI sockets and IP name
+/// lookup stay disabled. It is not a destination policy: owlet sends the
+/// request to any http or https URL exactly as given (loopback and link-local
+/// addresses included), so only load plugins you trust. Redirects are not
+/// followed; owlet waits at most 100 seconds for the whole exchange, and
+/// returns the complete response body (capped at 16 MiB). When the server is
+/// stopped, an exchange in flight is abandoned and `send` returns `Err`.
+interface http {
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    /// Sends one request. `Err` carries a transport-level failure (DNS,
+    /// connect, TLS, timeout, oversized body); HTTP error statuses are `Ok`.
+    send: func(method: string, url: string, headers: list<tuple<string, string>>, body: list<u8>) -> result<response, string>;
+}
+
+/// The contract every owlet WASM plugin implements. owlet hands the plugin one
+/// MCP JSON-RPC message at a time and receives the replies.
+///
+/// Calls are serial per plugin instance: the next message (including
+/// `notifications/cancelled` for the current request) is delivered only after
+/// `handle` returns, so a slow `http.send` delays every other message to that
+/// instance. Use `scope = "session"` to give each client its own instance.
+///
+/// owlet grants the WASI context configured for the server: argv (`args`),
+/// environment (`env`, `inherit_env`) and read-only preopened directories
+/// (`dirs`).
+world mcp-plugin {
+    import http;
+
+    /// Handle one incoming MCP message, serialized as a JSON-RPC string.
+    ///
+    /// Returns zero or more JSON-RPC messages separated by '\n'. An empty
+    /// string means "no response" (the input was a notification or was
+    /// accepted without a reply).
+    export handle: func(request: string) -> string;
+
+    /// Called once when the instance is being stopped (server stop, session
+    /// end, owlet exit) or its input closes, after the last `handle` returned,
+    /// e.g. to end upstream sessions. Best effort: owlet allows a short grace
+    /// period during which `http.send` still works but is cut off at the
+    /// deadline. Not called if `handle` trapped or was interrupted by stop.
+    ///
+    /// (Not named `shutdown`: world-level exports become core symbols of the
+    /// same name, and that one clashes with libc's `shutdown`.)
+    export on-shutdown: func();
+}

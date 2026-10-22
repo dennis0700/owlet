@@ -9,6 +9,7 @@ type Dialog =
   | { kind: "add" }
   | { kind: "edit"; entry: Entry }
   | { kind: "delete"; name: string }
+  | { kind: "uninstall"; name: string }
   | { kind: "discard" }
   | { kind: "update"; update: UpdateInfo }
   | null;
@@ -21,6 +22,7 @@ function Spinner() {
 }
 
 function summary(s: ServerConfig): string {
+  if (s.wasm !== null) return ["wasm", s.wasm, ...s.args].join(" ");
   if (s.url !== null) return `${s.transport ?? "http"} · ${s.url}`;
   return [s.command, ...s.args].join(" ");
 }
@@ -37,6 +39,7 @@ export default function App() {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const [upToDate, setUpToDate] = useState(false);
+  const [installing, setInstalling] = useState<string | null>(null);
 
   const run = useCallback(async (op: () => Promise<Snapshot>, done?: string) => {
     try {
@@ -130,6 +133,13 @@ export default function App() {
 
   async function onReload() {
     await withSpinner(setReloading, () => run(api.reload));
+  }
+
+  async function onInstall(name: string) {
+    await withSpinner(
+      (busy) => setInstalling(busy ? name : null),
+      () => run(() => api.installPlugin(name), `Installed ${name}. Save to add its server.`),
+    );
   }
 
   async function onUpdate() {
@@ -337,6 +347,59 @@ export default function App() {
         ))}
       </ul>
 
+      <h2 className="section-title">Plugins</h2>
+      <ul className="servers" aria-label="Plugins">
+        {snap.plugins.map((plugin) => {
+          const entry = snap.entries.find((e) => e.name === plugin.server);
+          return (
+            <li key={plugin.name} className={entry && !entry.server.enabled ? "off" : ""}>
+              <div className="info">
+                <div className="title">
+                  <strong>{plugin.name}</strong>
+                  {plugin.installed && <span className="tag">installed</span>}
+                </div>
+                <span className="description">{plugin.description}</span>
+              </div>
+              <div className="controls">
+                {entry ? (
+                  <>
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => setDialog({ kind: "uninstall", name: plugin.name })}
+                      disabled={locked}
+                    >
+                      Uninstall
+                    </button>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={entry.server.enabled}
+                      aria-label={`${entry.server.enabled ? "Disable" : "Enable"} ${entry.name}`}
+                      className="switch"
+                      disabled={locked}
+                      onClick={() =>
+                        void run(() => api.setEnabled(entry.name, !entry.server.enabled))
+                      }
+                    />
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    aria-busy={installing === plugin.name}
+                    disabled={locked || installing !== null}
+                    onClick={() => void onInstall(plugin.name)}
+                  >
+                    {installing === plugin.name && <Spinner />}
+                    Install
+                  </button>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+
       {(dialog?.kind === "add" || dialog?.kind === "edit") && (
         <ServerDialog
           editing={dialog.kind === "edit" ? dialog.entry : null}
@@ -364,6 +427,19 @@ export default function App() {
             const name = dialog.name;
             setDialog(null);
             void run(() => api.deleteServer(name));
+          }}
+        />
+      )}
+      {dialog?.kind === "uninstall" && (
+        <ConfirmDialog
+          title={`Uninstall ${dialog.name}?`}
+          message="Its server entry is removed from the draft. The plugin file is deleted when you press Save."
+          confirmLabel="Uninstall"
+          onCancel={() => setDialog(null)}
+          onConfirm={() => {
+            const name = dialog.name;
+            setDialog(null);
+            void run(() => api.uninstallPlugin(name));
           }}
         />
       )}

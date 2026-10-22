@@ -311,6 +311,26 @@ sequenceDiagram
     R-->>O: message event with the tools/call result
 ```
 
+### WASM plugins (`wasm.rs`)
+
+- A plugin is a component built against `wit/mcp-plugin.wit`: it exports `handle(request) -> string` and `on-shutdown()`, and may import `owlet:plugin/http`. The reply holds zero or more JSON-RPC messages separated by `\n`; each is dispatched like a stdio line. The export is not named `shutdown` because wit-bindgen exports world functions as core symbols of the same name, which clashes with libc's socket `shutdown`. Validation and install only check that the bytes are a component, so an older component without `on-shutdown` installs but fails at instantiation.
+- A wasmtime `Store` is not `Send`, so each instance runs on its own OS thread with a current-thread tokio runtime and handles one message at a time. The runtime is entered only to wait for the next outgoing message or, from inside the synchronous `http.send` import, to run the reqwest request (100 s timeout, no redirects, 16 MiB body cap). `handle` is called outside `block_on`, so the import never nests runtimes.
+- Stop preempts a running call: the wait and the import race the request against `stop` (`biased`), so an in-flight exchange is abandoned, and the shared engine uses epoch interruption (a thread bumps the epoch every 100 ms) so guest code traps once its store sees `stop`. The epoch thread starts with the first running plugin, so `owlet plugin install` and UI validation spawn no thread. A guest blocked inside a WASI host call (for example a `wasi:clocks` sleep or poll through the sync linker) is not preempted until that call returns. Components are compiled on the blocking pool and cached per path and mtime; each new compilation drops cache entries whose file was removed or changed.
+- If the loop ends while idle (stop between calls, or the outgoing channel closed), owlet calls `on-shutdown` with a 2 s grace period (`SHUTDOWN_GRACE`): during it `http.send` runs against the deadline instead of `stop`, and guest code traps once the deadline has passed. aws-mcp uses it to `DELETE` every live backend session. An instance stopped during a call skips `on-shutdown`.
+- The WASI context holds only explicit grants: argv (server name + `args`), environment (`inherit_env` matches overlaid with `env`) and `dirs` preopened read-only. WASI sockets and name lookup stay off, so `http.send` is the only way out. It has no destination policy (any http(s) URL), so plugins are trusted code.
+
+```mermaid
+flowchart LR
+    C[MCP client] -->|Streamable HTTP| O[owlet]
+    O -->|handle| P[aws-mcp.wasm]
+    P -->|http.send import| R[reqwest in owlet]
+    R -->|SigV4-signed HTTPS| A[AWS MCP endpoint]
+```
+
+- The aws-mcp plugin (`plugins/aws`) resolves credentials itself over `http.send`: static keys, STS AssumeRole (`source_profile` or `credential_source = Environment`), web identity, and SSO from the `aws sso login` cache (read through the `dirs` grant, never refreshed). Temporary credentials are cached until 5 minutes before expiry. `credential_process` needs a process and `mfa_serial` needs a prompt, so both are rejected. `--read-only` filters tools by `readOnlyHint`; with several profiles the auth tools gain an `aws_profile` argument and each non-default profile gets its own backend session, which `on-shutdown` also deletes.
+
+- `plugin.rs` holds the installable catalog. `owlet plugin install` (and the UI) fetch `<asset>` and `<asset>.sha256` from the GitHub release `v<owlet version>`, check that the bytes load as a component, write them atomically to `<config dir>/plugins/<name>.wasm` and add the default server entry.
+
 ### SSE parser
 
 `remote::SseParser` is an incremental parser for `text/event-stream`. It handles chunk boundaries, LF and CRLF, comment lines and multi-line `data:`, and defaults the event name to `message`. Both HTTP transports use it.
@@ -384,7 +404,7 @@ flowchart LR
 1. `check`: verifies that the tag matches the version in `Cargo.toml`, `ui/src-tauri/Cargo.toml`, `ui/src-tauri/tauri.conf.json` and `ui/package.json`, then runs clippy (`-D warnings`) and tests on Linux and macOS.
 2. `build-linux`: builds `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with `cargo zigbuild`, using a pinned Zig release checked by sha256, and verifies that the binaries are statically linked. Zig also provides the C toolchain that `aws-lc-rs` (via rustls) needs, so cmake is not required.
 3. `build-macos`: builds the CLI for `aarch64-apple-darwin` on `macos-15`.
-4. `build-ui`: builds the Tauri desktop app for `aarch64-apple-darwin` on `macos-15`. The bundle is ad-hoc signed, and the updater archive (`.app.tar.gz`) is signed with the minisign key in the `TAURI_SIGNING_PRIVATE_KEY` secret. The matching public key is in `tauri.conf.json`, so losing the private key means installed apps can no longer be updated.
+4. `build-ui`: builds the Tauri desktop app for `aarch64-apple-darwin` on `macos-15`. The bundle is ad-hoc signed, and the updater archive (`.app.tar.gz`) is signed with the minisign key in the `TAURI_SIGNING_PRIVATE_KEY` secret. After the build, the job runs the `ui/src-tauri` tests. The matching public key is in `tauri.conf.json`, so losing the private key means installed apps can no longer be updated.
 5. `smoke`: runs each packaged CLI binary on a native runner for its architecture (`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`).
 6. `release`: writes `latest.json` (the manifest the desktop app polls for updates), then uploads the CLI tarballs, the `.dmg`, the signed updater archive and the `.sha256` files to a GitHub Release. Tags containing `-` are marked as prereleases.
 

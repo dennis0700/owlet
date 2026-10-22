@@ -1,6 +1,6 @@
 [package]
 name = "owlet"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 
@@ -24,6 +24,8 @@ toml_edit = "0.25.15"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.27.0", features = ["v4"] }
+wasmtime = { version = "40.0.4", default-features = false, features = ["cranelift", "runtime", "component-model", "gc-drc"] }
+wasmtime-wasi = "40.0.4"
 
 [target."cfg(unix)".dependencies]
 nix = { version = "0.31.3", features = ["signal"] }

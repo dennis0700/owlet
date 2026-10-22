@@ -17,25 +17,25 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 /// GitHub API root of the repository that publishes releases.
-const API_BASE: &str = "https://api.github.com/repos/dennis0700/owlet";
+pub(crate) const API_BASE: &str = "https://api.github.com/repos/dennis0700/owlet";
 
 /// Upper bound for the unpacked binary, so a corrupt archive cannot fill the disk.
 const MAX_BINARY: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
-struct Release {
+pub(crate) struct Release {
     tag_name: String,
     assets: Vec<Asset>,
 }
 
 #[derive(Debug, Deserialize)]
-struct Asset {
+pub(crate) struct Asset {
     name: String,
-    browser_download_url: String,
+    pub(crate) browser_download_url: String,
 }
 
 impl Release {
-    fn asset(&self, name: &str) -> anyhow::Result<&Asset> {
+    pub(crate) fn asset(&self, name: &str) -> anyhow::Result<&Asset> {
         self.assets
             .iter()
             .find(|a| a.name == name)
@@ -90,14 +90,8 @@ impl Updater {
     /// let updater = Updater::new("https://api.github.com/repos/o/r", "aarch64-apple-darwin")?;
     /// ```
     pub fn new(api: &str, target: &str) -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!("owlet/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .context("build http client")?;
         Ok(Self {
-            client,
+            client: client()?,
             api: api.trim_end_matches('/').to_owned(),
             target: target.to_owned(),
         })
@@ -153,16 +147,30 @@ impl Updater {
     }
 
     async fn download(&self, url: &str) -> anyhow::Result<Vec<u8>> {
-        let resp = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .with_context(|| format!("GET {url}"))?
-            .error_for_status()
-            .with_context(|| format!("GET {url}"))?;
-        Ok(resp.bytes().await.context("read response body")?.to_vec())
+        download(&self.client, url).await
     }
+}
+
+/// HTTP client for GitHub release downloads.
+pub(crate) fn client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!("owlet/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .context("build http client")
+}
+
+/// GETs `url` and returns the whole body; non-2xx statuses are errors.
+pub(crate) async fn download(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<u8>> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url}"))?;
+    Ok(resp.bytes().await.context("read response body")?.to_vec())
 }
 
 fn parse_tag(tag: &str) -> anyhow::Result<Version> {
@@ -171,7 +179,7 @@ fn parse_tag(tag: &str) -> anyhow::Result<Version> {
 }
 
 /// Checks `data` against the first field of a `shasum` output line.
-fn verify_sha256(data: &[u8], sums: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn verify_sha256(data: &[u8], sums: &[u8]) -> anyhow::Result<()> {
     let sums = std::str::from_utf8(sums).context("checksum file is not UTF-8")?;
     let expected = sums
         .split_whitespace()
