@@ -7,6 +7,7 @@
 
 mod app;
 mod form;
+mod self_update;
 mod server;
 mod store;
 mod tray;

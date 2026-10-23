@@ -1,23 +1,26 @@
-//! Check-only updater for the gpui UI.
+//! Updater for the gpui UI, backed by GitHub Releases.
 //!
-//! gpui-kit has no signed auto-updater equivalent to Tauri's
-//! `tauri-plugin-updater`, and there is no safe in-place `.app`/`.dmg`
-//! self-replace that a running packaged bundle can perform without a helper.
-//! So this module only *checks* GitHub Releases: it compares the running
-//! version against the latest release tag and, when a newer one exists,
-//! surfaces the version, release notes and a download URL. Installing is left
-//! to the user, who opens the download in their browser.
+//! [`Updater::check`] compares the running version against the latest release
+//! tag and, when a newer one exists, surfaces the version, release notes, a
+//! browser download URL and (when published) the UI's
+//! `owlet-ui-<tag>-<target>.dmg` with its `.sha256`. [`Updater::install`]
+//! downloads that dmg, verifies the checksum and swaps the running `.app`
+//! through [`crate::self_update`]; when in-place update is not possible the UI
+//! falls back to opening the download in the browser.
 //!
 //! The logic mirrors the `owlet-core` crate's `update.rs` GitHub Releases
-//! pattern (same repository, same release pipeline) but targets the UI's
-//! release asset (`owlet-ui-<tag>-<target>.dmg`) and never downloads or swaps
-//! files.
+//! pattern (same repository, same release pipeline).
 
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use semver::Version;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+use crate::self_update;
 
 /// GitHub API root of the repository that publishes releases.
 const API_BASE: &str = "https://api.github.com/repos/dennis0700/owlet";
@@ -30,6 +33,15 @@ pub struct UpdateInfo {
     pub(crate) notes: Option<String>,
     /// Where the user downloads the update (the UI asset, or the release page).
     pub(crate) download_url: String,
+    /// The dmg and its checksum, when both are published.
+    pub(crate) package: Option<Package>,
+}
+
+/// Download URLs of a release's UI dmg and its `shasum` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Package {
+    pub(crate) dmg_url: String,
+    pub(crate) sha256_url: String,
 }
 
 impl UpdateInfo {
@@ -46,6 +58,7 @@ impl UpdateInfo {
             version: version.to_owned(),
             notes: notes.filter(|n| !n.trim().is_empty()),
             download_url,
+            package: None,
         }
     }
 
@@ -67,6 +80,11 @@ impl UpdateInfo {
     /// Browser URL where the update can be downloaded.
     pub fn download_url(&self) -> &str {
         &self.download_url
+    }
+
+    /// The installable dmg, if the release publishes it with a checksum.
+    pub(crate) fn package(&self) -> Option<&Package> {
+        self.package.as_ref()
     }
 }
 
@@ -156,22 +174,66 @@ impl Updater {
         }
 
         let asset = format!("owlet-ui-{}-{}.dmg", release.tag_name, self.target);
-        let download_url = release
-            .assets
-            .iter()
-            .find(|a| a.name == asset)
-            .map(|a| a.browser_download_url.clone())
+        let url_of = |name: &str| {
+            release
+                .assets
+                .iter()
+                .find(|a| a.name == name)
+                .map(|a| a.browser_download_url.clone())
+        };
+        let dmg_url = url_of(&asset);
+        let package = dmg_url
+            .clone()
+            .zip(url_of(&format!("{asset}.sha256")))
+            .map(|(dmg_url, sha256_url)| Package {
+                dmg_url,
+                sha256_url,
+            });
+        let download_url = dmg_url
             .or_else(|| release.html_url.clone())
             .with_context(|| {
                 format!("release {} has no `{asset}` asset or page url", release.tag_name)
             })?;
 
-        Ok(Some(UpdateInfo::new(
+        let mut info = UpdateInfo::new(
             &current.to_string(),
             &latest.to_string(),
             release.body,
             download_url,
-        )))
+        );
+        info.package = package;
+        Ok(Some(info))
+    }
+
+    /// Downloads `package`, verifies its checksum and replaces `bundle` with
+    /// the app inside it. The caller relaunches `bundle` afterwards.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let bundle = self_update::preflight()?;
+    /// updater.install(info.package().unwrap(), &bundle).await?;
+    /// ```
+    pub(crate) async fn install(&self, package: &Package, bundle: &Path) -> anyhow::Result<()> {
+        let dmg = self.download(&package.dmg_url).await?;
+        let sums = self.download(&package.sha256_url).await?;
+        verify_sha256(&dmg, &sums).context("verify the update")?;
+        let bundle: PathBuf = bundle.to_path_buf();
+        tokio::task::spawn_blocking(move || self_update::apply(&dmg, &bundle))
+            .await
+            .context("install task failed")?
+    }
+
+    async fn download(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url}"))?;
+        Ok(resp.bytes().await.context("read response body")?.to_vec())
     }
 
     async fn latest(&self) -> anyhow::Result<Release> {
@@ -196,9 +258,27 @@ fn client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(concat!("owlet-gpui/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60))
+        // Long enough for the dmg download, not just the API call.
+        .timeout(Duration::from_secs(300))
         .build()
         .context("build http client")
+}
+
+/// Checks `data` against the first field of a `shasum` output line.
+fn verify_sha256(data: &[u8], sums: &[u8]) -> anyhow::Result<()> {
+    let sums = std::str::from_utf8(sums).context("checksum file is not UTF-8")?;
+    let expected = sums
+        .split_whitespace()
+        .next()
+        .context("checksum file is empty")?;
+    let actual = Sha256::digest(data).iter().fold(String::new(), |mut hex, b| {
+        let _ = write!(hex, "{b:02x}");
+        hex
+    });
+    if !actual.eq_ignore_ascii_case(expected) {
+        bail!("sha256 mismatch: expected {expected}, got {actual}");
+    }
+    Ok(())
 }
 
 fn parse_version(v: &str) -> anyhow::Result<Version> {
@@ -347,6 +427,46 @@ mod tests {
         assert_eq!(info.current(), "0.2.0");
         assert_eq!(info.notes(), Some("New things"));
         assert_eq!(info.download_url(), format!("{base}/dl/owlet-ui-v9.9.9-{TARGET}.dmg"));
+        // No `.sha256` asset: not installable in place.
+        assert_eq!(info.package(), None);
+    }
+
+    #[tokio::test]
+    async fn offers_the_package_when_the_checksum_is_published() {
+        let base = serve(serde_json::json!({
+            "tag_name": "v9.9.9",
+            "assets": [
+                {"name": format!("owlet-ui-v9.9.9-{TARGET}.dmg"), "browser_download_url": "https://x/dmg"},
+                {"name": format!("owlet-ui-v9.9.9-{TARGET}.dmg.sha256"), "browser_download_url": "https://x/sha"},
+            ],
+        }))
+        .await;
+
+        let info = Updater::new(&base, TARGET)
+            .expect("updater")
+            .check("0.2.0")
+            .await
+            .expect("check")
+            .expect("update available");
+        assert_eq!(
+            info.package(),
+            Some(&Package {
+                dmg_url: "https://x/dmg".to_owned(),
+                sha256_url: "https://x/sha".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn verifies_shasum_output() {
+        let hex = Sha256::digest(b"dmg").iter().fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+        let line = format!("{hex}  owlet-ui.dmg\n");
+        verify_sha256(b"dmg", line.as_bytes()).expect("match");
+        assert!(verify_sha256(b"other", line.as_bytes()).is_err());
+        assert!(verify_sha256(b"dmg", b"").is_err());
     }
 
     #[tokio::test]

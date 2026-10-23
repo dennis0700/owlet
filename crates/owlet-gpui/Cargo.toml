@@ -31,7 +31,7 @@ tokio = { version = "1.53.2", features = [
     "time",
 ] }
 
-# The check-only updater talks to the GitHub Releases API. Matching owlet's
+# The updater talks to the GitHub Releases API. Matching owlet's
 # `reqwest` feature set (default-features off + rustls) keeps the dependency
 # graph unchanged. `stream` is unified in by owlet, so it is not requested here.
 reqwest = { version = "0.13.5", default-features = false, features = [
@@ -40,6 +40,7 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 gpui-tray = { version = "0.3.0", default-features = false, features = ["gpui-kit"] }
 

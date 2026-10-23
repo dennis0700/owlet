@@ -4,7 +4,7 @@
 //! the former Tauri/React UI. Closing the window only hides the app (and its
 //! Dock icon) so the embedded server keeps running; the tray icon, a Dock
 //! click or relaunching the app brings it back. Quitting (tray **Quit**, Dock
-//! **Quit**, logout) shuts the embedded server down through its normal
+//! **Quit**, Cmd/Ctrl-Q, logout) shuts the embedded server down through its normal
 //! graceful path so upstream MCP child processes are stopped explicitly
 //! rather than left to OS teardown.
 
@@ -58,6 +58,12 @@ fn main() {
     app.on_reopen(show_window);
     app.run(move |cx| {
         gpui_kit::init(cx);
+        // Cmd-Q on macOS (Ctrl-Q elsewhere) plus Ctrl-Q everywhere; handled
+        // by the same global `Quit` action as the tray menu.
+        cx.bind_keys([
+            KeyBinding::new("secondary-q", Quit, None),
+            KeyBinding::new("ctrl-q", Quit, None),
+        ]);
         let path = path.clone();
         let (_window, model) = gpui_kit::open_window(
             WindowOptions {
@@ -67,9 +73,11 @@ fn main() {
                 }),
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(760.), px(820.)),
+                    size(px(800.), px(600.)),
                     cx,
                 ))),
+                // Below this the header/list/dialog layout starts to break.
+                window_min_size: Some(size(px(800.), px(600.))),
                 ..Default::default()
             },
             cx,
@@ -84,9 +92,12 @@ fn main() {
         .expect("failed to open window");
 
         // Every quit path gracefully stops the embedded server first (same
-        // path as the Stop button).
+        // path as the Stop button), then starts the new app if an update
+        // was just installed.
         cx.on_app_quit(move |cx| {
-            model.read(cx).shutdown_server();
+            let model = model.read(cx);
+            model.shutdown_server();
+            model.relaunch_if_updated();
             async {}
         })
         .detach();

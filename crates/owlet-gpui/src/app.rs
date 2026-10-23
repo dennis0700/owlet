@@ -2,6 +2,7 @@
 //! [`ServerState`] and all transient UI state, rendered to reproduce the
 //! Tauri/React frontend feature for feature.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use owlet::{Plugin, RemoteTransport, Scope, ServerConfig};
 use tokio::runtime::Runtime;
 
 use crate::form::{self, FormValues, Kind};
+use crate::self_update;
 use crate::server::{ServerState, ServerStatus};
 use crate::store::{Entry, Snapshot, Status, Store};
 use crate::updater::{self, UpdateInfo, Updater};
@@ -188,6 +190,10 @@ pub struct AppModel {
     update: Option<UpdateInfo>,
     checking: bool,
     up_to_date: bool,
+    /// An in-place update is downloading/installing.
+    updating: bool,
+    /// Bundle to relaunch on quit, set once an update has been installed.
+    relaunch: Option<PathBuf>,
 
     saving: bool,
     reloading: bool,
@@ -204,6 +210,7 @@ pub struct AppModel {
     _install: Option<Task<()>>,
     _restart: Option<Task<()>>,
     _check: Option<Task<()>>,
+    _update: Option<Task<()>>,
     _reload: Option<Task<()>>,
     _save: Option<Task<()>>,
 }
@@ -260,6 +267,8 @@ impl AppModel {
             update: None,
             checking: false,
             up_to_date: false,
+            updating: false,
+            relaunch: None,
             saving: false,
             reloading: false,
             restarting: false,
@@ -271,9 +280,12 @@ impl AppModel {
             _install: None,
             _restart: None,
             _check: None,
+            _update: None,
             _reload: None,
             _save: None,
         };
+        // Remove the bundle a previous update moved aside.
+        model.runtime.spawn_blocking(self_update::cleanup_leftovers);
         model.start_background_update_check(cx);
         let _ = window;
         model
@@ -569,28 +581,114 @@ impl AppModel {
     fn open_update_dialog(&self, info: UpdateInfo, window: &mut Window, cx: &mut Context<Self>) {
         let version = info.version().to_owned();
         let current = info.current().to_owned();
-        let notes = info.notes().map(str::to_owned);
-        let url = info.download_url().to_owned();
+        let notes = info
+            .notes()
+            .map(|n| format!("\n\n{n}"))
+            .unwrap_or_default();
+        // In place when the release has a verifiable dmg and the bundle's
+        // folder is writable; otherwise the browser download.
+        let in_place = match info.package() {
+            Some(_) => self_update::preflight().map_err(|e| format!("{e:#}")),
+            None => Err("this release has no installable package".to_owned()),
+        };
+        let model = cx.entity();
         window.open_alert_dialog(cx, move |alert, _window, _cx| {
-            let notes = notes.clone();
-            let url = url.clone();
-            alert
+            let alert = alert
                 .title("Update available")
-                .description(format!(
-                    "Owlet {version} is available (you have {current}). Download it from your browser; the current app keeps running.{}",
-                    notes
-                        .as_deref()
-                        .map(|n| format!("\n\n{n}"))
-                        .unwrap_or_default()
-                ))
                 .show_cancel(true)
-                .ok_text("Download")
-                .cancel_text("Later")
-                .on_ok(move |_, _, _| {
-                    let _ = updater::open_download(&url);
-                    true
-                })
+                .cancel_text("Later");
+            match &in_place {
+                Ok(bundle) => {
+                    let model = model.clone();
+                    let info = info.clone();
+                    let bundle = bundle.clone();
+                    alert
+                        .description(format!(
+                            "Owlet {version} is available (you have {current}). Owlet downloads it, replaces the app and restarts; the embedded server restarts with it.{notes}"
+                        ))
+                        .ok_text("Update and restart")
+                        .on_ok(move |_, _, cx| {
+                            model.update(cx, |this, cx| {
+                                this.install_update(info.clone(), bundle.clone(), cx)
+                            });
+                            true
+                        })
+                }
+                Err(reason) => {
+                    let url = info.download_url().to_owned();
+                    alert
+                        .description(format!(
+                            "Owlet {version} is available (you have {current}). In-app update is unavailable ({reason}); download it from your browser, the current app keeps running.{notes}"
+                        ))
+                        .ok_text("Download")
+                        .on_ok(move |_, _, _| {
+                            let _ = updater::open_download(&url);
+                            true
+                        })
+                }
+            }
         });
+    }
+
+    /// Downloads, verifies and installs `info`'s package over `bundle`, then
+    /// quits; [`Self::relaunch_if_updated`] starts the new app on quit.
+    fn install_update(&mut self, info: UpdateInfo, bundle: PathBuf, cx: &mut Context<Self>) {
+        if self.updating {
+            return;
+        }
+        if self.snapshot().dirty {
+            self.set_error("Save or discard your changes before updating.", cx);
+            return;
+        }
+        let Some(package) = info.package().cloned() else {
+            return;
+        };
+        let updater = match Updater::for_this_platform() {
+            Ok(Some(updater)) => updater,
+            Ok(None) => return self.set_error("No update channel for this platform", cx),
+            Err(e) => return self.set_error(format!("{e:#}"), cx),
+        };
+        self.updating = true;
+        self.clear_banners();
+        cx.notify();
+        let runtime = Arc::clone(&self.runtime);
+        self._update = Some(cx.spawn(async move |this, cx| {
+            let target = bundle.clone();
+            let result = runtime
+                .spawn(async move { updater.install(&package, &target).await })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.updating = false;
+                match result {
+                    Ok(Ok(())) => {
+                        this.relaunch = Some(bundle);
+                        cx.quit();
+                    }
+                    Ok(Err(e)) => this.set_error(format!("Update failed: {e:#}"), cx),
+                    Err(e) => this.set_error(format!("Update failed: {e}"), cx),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Starts the freshly installed app, if an update was installed. Called on
+    /// quit after [`Self::shutdown_server`], so the new instance can bind the
+    /// listen address.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// model.read(cx).shutdown_server();
+    /// model.read(cx).relaunch_if_updated();
+    /// ```
+    pub fn relaunch_if_updated(&self) {
+        let Some(bundle) = &self.relaunch else {
+            return;
+        };
+        if let Err(e) = self_update::relaunch(bundle) {
+            eprintln!("owlet-gpui: cannot relaunch after update: {e:#}");
+        }
     }
 
     // --- Server dialog ----------------------------------------------------
@@ -1358,6 +1456,8 @@ impl AppModel {
         // Check for updates button with three states.
         let update_btn = if self.up_to_date {
             Button::new("update").label("\u{2713} Up to date").disabled(true)
+        } else if self.updating {
+            Button::new("update").label("Updating\u{2026}").loading(true).disabled(true)
         } else if self.checking {
             Button::new("update").icon(IconName::RefreshCw).label("Checking\u{2026}").loading(true).disabled(true)
         } else if let Some(info) = &self.update {
