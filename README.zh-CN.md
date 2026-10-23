@@ -286,7 +286,7 @@ cargo build --release -p owlet-gpui    # 或：cargo run -p owlet-gpui
 - 编辑的是 `$OWLET_CONFIG` 指向的文件，未设置时为 `~/.config/owlet/config.toml`，路径会显示在窗口里。
 - 开关、新增、编辑、删除都只修改内存里的草稿，按 **Save** 才会写入文件；**Discard** 会丢弃草稿。
 - 保存时只改写 `[servers]`，注释、其他配置项和没改动的条目都会保留。
-- 关闭窗口会退出整个应用，包括内置的 owlet server（没有托盘常驻模式）。退出时未保存的草稿会丢失。
+- 关闭窗口会把应用隐藏到菜单栏（托盘）图标并从 Dock 移除，内置的 owlet server 和未保存的草稿都会保留。在托盘图标的菜单里选 **Show Owlet** 可以重新打开窗口，托盘菜单里的 **Quit** 会退出应用并停止内置 server。退出时未保存的草稿会丢失。
 - 应用会在配置的 `listen` 地址上启动自己的 owlet，并显示状态（**Start**、**Stop**、**Restart**）。保存后点 **Restart** 让改动生效。它不会控制另外运行的 `owlet` 进程；如果已有一个在运行，请先停掉，否则端口会被占用。
 - 配置文件解析失败时，UI 会显示错误并禁用编辑，不会覆盖这个文件。
 

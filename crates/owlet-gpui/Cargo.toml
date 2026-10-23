@@ -40,6 +40,8 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+gpui-tray = { version = "0.3.0", default-features = false, features = ["gpui-kit"] }
 
 [dev-dependencies]
 tempfile.workspace = true

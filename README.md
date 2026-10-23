@@ -287,7 +287,7 @@ cargo build --release -p owlet-gpui    # or: cargo run -p owlet-gpui
 - It edits the file given by `$OWLET_CONFIG`, or `~/.config/owlet/config.toml` by default. The path is shown in the window.
 - The switch, add, edit and delete actions only change an in-memory draft. Nothing is written until you press **Save**; **Discard** drops the draft.
 - Saving rewrites only `[servers]`. Comments, other keys and untouched entries are preserved.
-- Closing the window quits the whole application, including the embedded owlet server (there is no tray-resident mode). Quitting discards an unsaved draft.
+- Closing the window hides the app to the menu bar (tray) icon and removes it from the Dock; the embedded owlet server and the unsaved draft are kept. Choose **Show Owlet** from the tray icon's menu to bring the window back, and use **Quit** in the tray menu to exit, which stops the embedded server. Quitting discards an unsaved draft.
 - It starts its own owlet on the configured `listen` address and shows its status (**Start**, **Stop**, **Restart**). Press **Restart** after saving to apply changes. It does not control a separately running `owlet` process; stop that one first, or the port will be taken.
 - If the config file cannot be parsed, the UI shows the error and disables editing so the file is never overwritten.
 
