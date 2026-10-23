@@ -4944,7 +4944,7 @@ dependencies = [
 
 [[package]]
 name = "owlet"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4973,7 +4973,7 @@ dependencies = [
 
 [[package]]
 name = "owlet-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4986,7 +4986,7 @@ dependencies = [
 
 [[package]]
 name = "owlet-gpui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
