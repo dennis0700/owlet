@@ -3,6 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::Context;
 use owlet::{Config, Hub};
 use parking_lot::Mutex;
+use serde::Deserialize;
 use tokio::{
     net::TcpListener,
     spawn,
@@ -36,6 +37,37 @@ struct Inner {
     status: ServerStatus,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
+    /// The hub of the running server, for [`ServerState::hub_status`].
+    hub: Option<Arc<Hub>>,
+}
+
+/// Runtime snapshot of the running hub, as served by `GET /status`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct HubStatus {
+    pub servers: Vec<HubServer>,
+    pub instances: Vec<HubInstance>,
+    pub sessions: usize,
+}
+
+/// One configured server in [`HubStatus`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HubServer {
+    pub name: String,
+    pub enabled: bool,
+    pub transport: String,
+    pub scope: String,
+}
+
+/// One upstream instance in [`HubStatus`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HubInstance {
+    pub server: String,
+    pub instance: String,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub inflight: u64,
+    pub idle_secs: u64,
+    pub sessions: usize,
 }
 
 /// Owns the owlet server running inside the UI process.
@@ -58,6 +90,7 @@ impl ServerState {
                 status: ServerStatus::Stopped,
                 stop: None,
                 task: None,
+                hub: None,
             })),
             notify: Arc::new(notify),
         }
@@ -72,6 +105,20 @@ impl ServerState {
     /// ```
     pub fn status(&self) -> ServerStatus {
         self.inner.lock().status.clone()
+    }
+
+    /// Runtime snapshot of the hub; `None` unless the server is running.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// if let Some(status) = server.hub_status() {
+    ///     println!("{} sessions", status.sessions);
+    /// }
+    /// ```
+    pub fn hub_status(&self) -> Option<HubStatus> {
+        let hub = self.inner.lock().hub.clone()?;
+        serde_json::from_value(hub.status()).ok()
     }
 
     /// Starts the server on the config file at `path` unless it is already
@@ -132,6 +179,7 @@ impl ServerState {
         };
         if time::timeout(STOP_TIMEOUT, &mut task).await.is_err() {
             task.abort();
+            self.inner.lock().hub = None;
             set_status(&self.inner, &self.notify, ServerStatus::Stopped);
         }
     }
@@ -163,6 +211,7 @@ async fn serve(
     let hub = Arc::new(Hub::new(&cfg));
     let reaper = spawn(Arc::clone(&hub).reap_loop(reap_every));
 
+    inner.lock().hub = Some(Arc::clone(&hub));
     set_status(
         inner,
         notify,
@@ -177,6 +226,7 @@ async fn serve(
         .await;
 
     reaper.abort();
+    inner.lock().hub = None;
     hub.shutdown().await;
     result.context("serve")
 }
@@ -207,6 +257,7 @@ mod tests {
     #[tokio::test]
     async fn runs_then_stops() {
         let file = config("127.0.0.1:0");
+        writeln!(file.as_file(), "[servers.a]\ncommand = \"true\"").expect("write server");
         let events = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&events);
         let server = ServerState::new(move |s| log.lock().push(s.clone()));
@@ -221,9 +272,16 @@ mod tests {
             tokio::net::TcpStream::connect(&listen).await.is_ok(),
             "port must accept connections"
         );
+        let hub = server.hub_status().expect("hub status while running");
+        assert_eq!(hub.servers.len(), 1);
+        assert_eq!(
+            (hub.servers[0].transport.as_str(), hub.servers[0].scope.as_str()),
+            ("stdio", "shared")
+        );
 
         server.stop().await;
         wait_for(&server, |s| *s == ServerStatus::Stopped).await;
+        assert!(server.hub_status().is_none());
         assert_eq!(events.lock().first(), Some(&ServerStatus::Starting));
         assert_eq!(events.lock().last(), Some(&ServerStatus::Stopped));
     }

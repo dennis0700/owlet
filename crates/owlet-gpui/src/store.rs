@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
     path::{Path, PathBuf},
 };
 
@@ -41,16 +42,21 @@ pub struct Snapshot {
     pub load_error: Option<String>,
     /// True when the draft differs from the config file (including deletions).
     pub dirty: bool,
+    /// Draft `listen` address.
+    pub listen: SocketAddr,
     pub entries: Vec<Entry>,
     pub plugins: Vec<PluginInfo>,
 }
 
-/// In-memory draft of the `[servers]` table, written out only by [`Store::save`].
+/// In-memory draft of `listen` and the `[servers]` table, written out only by
+/// [`Store::save`].
 #[derive(Debug)]
 pub struct Store {
     path: PathBuf,
     saved: BTreeMap<String, ServerConfig>,
     draft: BTreeMap<String, ServerConfig>,
+    saved_listen: SocketAddr,
+    draft_listen: SocketAddr,
     load_error: Option<String>,
     /// Plugins uninstalled in the current draft; Save deletes their files.
     pending_uninstall: BTreeSet<&'static str>,
@@ -70,6 +76,8 @@ impl Store {
             path,
             saved: BTreeMap::new(),
             draft: BTreeMap::new(),
+            saved_listen: SocketAddr::from(([127, 0, 0, 1], 8808)),
+            draft_listen: SocketAddr::from(([127, 0, 0, 1], 8808)),
             load_error: None,
             pending_uninstall: BTreeSet::new(),
         };
@@ -86,10 +94,14 @@ impl Store {
     /// ```
     pub fn reload(&mut self) {
         self.pending_uninstall.clear();
-        match Config::load_servers(&self.path) {
-            Ok(servers) => {
+        let loaded = Config::load_servers(&self.path)
+            .and_then(|servers| Ok((servers, Config::load_listen(&self.path)?)));
+        match loaded {
+            Ok((servers, listen)) => {
                 self.saved = servers.clone();
                 self.draft = servers;
+                self.saved_listen = listen;
+                self.draft_listen = listen;
                 self.load_error = None;
             }
             Err(e) => {
@@ -124,7 +136,8 @@ impl Store {
         Snapshot {
             path: self.path.to_string_lossy().into_owned(),
             load_error: self.load_error.clone(),
-            dirty: self.draft != self.saved,
+            dirty: self.draft != self.saved || self.draft_listen != self.saved_listen,
+            listen: self.draft_listen,
             entries,
             plugins: self.plugins(),
         }
@@ -204,6 +217,19 @@ impl Store {
     /// ```
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Sets the draft `listen` address.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// store.set_listen("127.0.0.1:9000".parse()?)?;
+    /// ```
+    pub fn set_listen(&mut self, listen: SocketAddr) -> anyhow::Result<()> {
+        self.editable()?;
+        self.draft_listen = listen;
+        Ok(())
     }
 
     /// Flips `enabled` in the draft.
@@ -289,6 +315,10 @@ impl Store {
     /// ```
     pub fn save(&mut self) -> anyhow::Result<()> {
         self.editable()?;
+        if self.draft_listen != self.saved_listen {
+            Config::persist_listen(&self.path, self.draft_listen)?;
+            self.saved_listen = self.draft_listen;
+        }
         Config::persist_servers(&self.path, &self.draft)?;
         self.saved = self.draft.clone();
         let pending = std::mem::take(&mut self.pending_uninstall);
@@ -360,6 +390,33 @@ mod tests {
         let on_disk = std::fs::read_to_string(s.path()).expect("read");
         assert!(on_disk.contains("# keep") && on_disk.contains("enabled = false"));
         assert!(set_enabled_missing(&mut s));
+    }
+
+    #[test]
+    fn listen_stays_in_memory_until_saved() {
+        let (_dir, mut s) = store("# keep\n[servers.a]\ncommand = \"x\"\n");
+        let addr: SocketAddr = "127.0.0.1:9100".parse().expect("addr");
+        assert_ne!(s.snapshot().listen, addr);
+
+        s.set_listen(addr).expect("set");
+        assert!(s.snapshot().dirty);
+        assert!(
+            !std::fs::read_to_string(s.path())
+                .expect("read")
+                .contains("listen")
+        );
+
+        s.reload();
+        assert!(!s.snapshot().dirty);
+        s.set_listen(addr).expect("set");
+        s.save().expect("save");
+        assert!(!s.snapshot().dirty);
+        assert_eq!(Config::load_listen(s.path()).expect("load"), addr);
+        assert!(
+            std::fs::read_to_string(s.path())
+                .expect("read")
+                .contains("# keep")
+        );
     }
 
     fn set_enabled_missing(s: &mut Store) -> bool {

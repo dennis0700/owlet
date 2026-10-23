@@ -7,6 +7,7 @@
 
 mod app;
 mod form;
+mod menu;
 mod self_update;
 mod server;
 mod store;
@@ -15,6 +16,7 @@ mod updater;
 
 pub use self::app::AppModel;
 pub use self::form::{FormValues, Kind, from_form, to_form};
+pub use self::menu::{CheckForUpdates, app_menus};
 pub use self::server::{ServerState, ServerStatus};
 pub use self::store::{Entry, PluginInfo, Snapshot, Status, Store};
 pub use self::tray::{Quit, ShowWindow, install_tray};

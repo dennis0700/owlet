@@ -2,6 +2,7 @@
 //! [`ServerState`] and all transient UI state, rendered to reproduce the
 //! Tauri/React frontend feature for feature.
 
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +11,10 @@ use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::collapsible::Collapsible;
 use gpui_kit::component::dialog::Dialog;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::table::{Table, TableBody, TableCell, TableHead, TableHeader, TableRow};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{IconName, Sizable};
 use gpui_kit::component::radio::{Radio, RadioGroup};
@@ -23,7 +27,7 @@ use tokio::runtime::Runtime;
 
 use crate::form::{self, FormValues, Kind};
 use crate::self_update;
-use crate::server::{ServerState, ServerStatus};
+use crate::server::{HubStatus, ServerState, ServerStatus};
 use crate::store::{Entry, Snapshot, Status, Store};
 use crate::updater::{self, UpdateInfo, Updater};
 
@@ -176,6 +180,13 @@ impl ServerForm {
     }
 }
 
+/// Top-level page selected in the tab bar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Home,
+    Settings,
+}
+
 /// Top-level application state.
 pub struct AppModel {
     store: Store,
@@ -183,13 +194,21 @@ pub struct AppModel {
     /// Background Tokio runtime hosting the embedded owlet server.
     runtime: Arc<Runtime>,
     status: ServerStatus,
+    /// Runtime snapshot of the running hub, sampled by the status poll.
+    hub: Option<HubStatus>,
+    page: Page,
+
+    /// Settings inputs for the draft `listen` address.
+    listen_host: Entity<InputState>,
+    listen_port: Entity<InputState>,
+    /// Set while the listen inputs do not form a valid address.
+    listen_error: Option<String>,
 
     error: Option<String>,
     notice: Option<String>,
 
     update: Option<UpdateInfo>,
     checking: bool,
-    up_to_date: bool,
     /// An in-place update is downloading/installing.
     updating: bool,
     /// Bundle to relaunch on quit, set once an update has been installed.
@@ -206,13 +225,13 @@ pub struct AppModel {
     // Task handles kept so dropping/replacing them cancels in-flight work.
     _status_poll: Task<()>,
     _notice_timer: Option<Task<()>>,
-    _up_to_date_timer: Option<Task<()>>,
     _install: Option<Task<()>>,
     _restart: Option<Task<()>>,
     _check: Option<Task<()>>,
     _update: Option<Task<()>>,
     _reload: Option<Task<()>>,
     _save: Option<Task<()>>,
+    _listen_subs: [Subscription; 2],
 }
 
 impl AppModel {
@@ -241,12 +260,24 @@ impl AppModel {
         let poll_server = Arc::clone(&server);
         let status_poll = cx.spawn(async move |this, cx| {
             let mut last: Option<ServerStatus> = None;
-            loop {
+            let mut last_hub: Option<HubStatus> = None;
+            for tick in 0u64.. {
                 let current = poll_server.status();
-                if last.as_ref() != Some(&current) {
+                let status_changed = last.as_ref() != Some(&current);
+                // Instance details change slowly; sample them once a second,
+                // or right away when the lifecycle status changes.
+                let hub_changed = (status_changed || tick % 5 == 0)
+                    .then(|| poll_server.hub_status())
+                    .filter(|hub| *hub != last_hub);
+                if status_changed || hub_changed.is_some() {
                     last = Some(current.clone());
+                    if let Some(hub) = hub_changed {
+                        last_hub = hub;
+                    }
+                    let hub = last_hub.clone();
                     let updated = this.update(cx, |this, cx| {
                         this.status = current;
+                        this.hub = hub;
                         cx.notify();
                     });
                     if updated.is_err() {
@@ -257,16 +288,42 @@ impl AppModel {
             }
         });
 
+        let listen = store.snapshot().listen;
+        let listen_host = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("127.0.0.1")
+                .default_value(listen.ip().to_string())
+        });
+        let listen_port = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("8808")
+                .default_value(listen.port().to_string())
+        });
+        let on_listen_change =
+            |this: &mut Self, _: &Entity<InputState>, event: &InputEvent, _: &mut Window, cx: &mut Context<Self>| {
+                if matches!(event, InputEvent::Change) {
+                    this.apply_listen_inputs(cx);
+                }
+            };
+        let listen_subs = [
+            cx.subscribe_in(&listen_host, window, on_listen_change),
+            cx.subscribe_in(&listen_port, window, on_listen_change),
+        ];
+
         let mut model = Self {
             store,
             server,
             runtime,
             status: ServerStatus::Starting,
+            hub: None,
+            page: Page::Home,
+            listen_host,
+            listen_port,
+            listen_error: None,
             error: None,
             notice: None,
             update: None,
             checking: false,
-            up_to_date: false,
             updating: false,
             relaunch: None,
             saving: false,
@@ -276,18 +333,17 @@ impl AppModel {
             form: None,
             _status_poll: status_poll,
             _notice_timer: None,
-            _up_to_date_timer: None,
             _install: None,
             _restart: None,
             _check: None,
             _update: None,
             _reload: None,
             _save: None,
+            _listen_subs: listen_subs,
         };
         // Remove the bundle a previous update moved aside.
         model.runtime.spawn_blocking(self_update::cleanup_leftovers);
         model.start_background_update_check(cx);
-        let _ = window;
         model
     }
 
@@ -326,11 +382,42 @@ impl AppModel {
 
     // --- Store operations -------------------------------------------------
 
-    fn reload(&mut self, cx: &mut Context<Self>) {
+    /// Parses the listen inputs into the draft; invalid text leaves the
+    /// draft unchanged and shows an inline error that blocks Save.
+    fn apply_listen_inputs(&mut self, cx: &mut Context<Self>) {
+        if self.locked() {
+            return;
+        }
+        let host = self.listen_host.read(cx).value().trim().to_owned();
+        let port = self.listen_port.read(cx).value().trim().to_owned();
+        let parsed = match (host.parse::<IpAddr>(), port.parse::<u16>()) {
+            (Ok(ip), Ok(port)) => Ok(SocketAddr::new(ip, port)),
+            (Err(_), _) => Err(format!("invalid IP address `{host}`")),
+            (_, Err(_)) => Err(format!("invalid port `{port}` (0-65535)")),
+        };
+        self.listen_error = match parsed {
+            Ok(addr) => self.store.set_listen(addr).err().map(|e| format!("{e:#}")),
+            Err(e) => Some(e),
+        };
+        cx.notify();
+    }
+
+    /// Resets the listen inputs to the draft address (after a reload).
+    fn sync_listen_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let listen = self.store.snapshot().listen;
+        self.listen_host
+            .update(cx, |s, cx| s.set_value(listen.ip().to_string(), window, cx));
+        self.listen_port
+            .update(cx, |s, cx| s.set_value(listen.port().to_string(), window, cx));
+        self.listen_error = None;
+    }
+
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.reloading {
             return;
         }
         self.store.reload();
+        self.sync_listen_inputs(window, cx);
         self.clear_banners();
         // The reload itself is instant; keep the spinner up for MIN_SPIN so
         // the action still registers visually, like the old UI.
@@ -346,7 +433,7 @@ impl AppModel {
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
-        if self.saving {
+        if self.saving || self.listen_error.is_some() {
             return;
         }
         match self.store.save() {
@@ -533,7 +620,15 @@ impl AppModel {
         }));
     }
 
-    fn on_check_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Handles the app menu's **Check for Updates…**: opens the update dialog
+    /// when an update is known, otherwise checks and reports the result.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// model.update(cx, |this, cx| this.check_for_updates(window, cx));
+    /// ```
+    pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(info) = self.update.clone() {
             self.open_update_dialog(info, window, cx);
             return;
@@ -559,17 +654,7 @@ impl AppModel {
                         this.update = Some(info.clone());
                         this.open_update_dialog(info, window, cx);
                     }
-                    Ok(Ok(None)) => {
-                        this.error = None;
-                        this.up_to_date = true;
-                        this._up_to_date_timer = Some(cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(Duration::from_secs(3)).await;
-                            let _ = this.update(cx, |this, cx| {
-                                this.up_to_date = false;
-                                cx.notify();
-                            });
-                        }));
-                    }
+                    Ok(Ok(None)) => this.set_notice("Owlet is up to date.", cx),
                     Ok(Err(e)) => this.set_error(format!("Cannot check for updates: {e:#}"), cx),
                     Err(e) => this.set_error(format!("Cannot check for updates: {e}"), cx),
                 }
@@ -1307,13 +1392,11 @@ impl AppModel {
                     })),
             );
 
-        if let Some(err) = &form.error {
-            body = body.child(
-                Alert::error("server-form-error", err.clone())
-                    .banner()
-                    .into_any_element(),
-            );
-        }
+        let error = form.error.as_ref().map(|err| {
+            Alert::error("server-form-error", err.clone())
+                .banner()
+                .into_any_element()
+        });
 
         let submit_label = if form.editing.is_some() { "Apply" } else { "Add" };
 
@@ -1335,11 +1418,32 @@ impl AppModel {
             );
 
         // Esc/cancel clears the retained form state, then lets the dialog close.
+        // The form scrolls inside a height cap so the dialog stays compact
+        // however many fields the server type shows; the error banner stays
+        // outside the scroll area so it is always visible. The scroll area
+        // needs a flex parent: under a plain `max_h` its `size_full` resolves
+        // to the content height, so nothing ever overflows and no scrollbar
+        // appears. This mirrors the Dialog's own body layout.
+        let mut content = div().flex().flex_col().gap_3().child(
+            div().flex().flex_col().max_h(px(380.)).child(
+                div().flex().flex_col().flex_1().overflow_hidden().child(
+                    div()
+                        .id("server-form-body")
+                        .size_full()
+                        .pr_4()
+                        .child(body)
+                        .overflow_y_scrollbar(),
+                ),
+            ),
+        );
+        if let Some(err) = error {
+            content = content.child(err);
+        }
         let model = cx.entity();
         dialog
             .title(title)
             .width(px(560.))
-            .child(body)
+            .child(content)
             .footer(footer)
             .on_cancel(move |_, _window, cx| {
                 model.update(cx, |this, _cx| this.form = None);
@@ -1358,25 +1462,28 @@ impl Render for AppModel {
             .filter(|e| e.status != Status::Unchanged)
             .count();
 
-        let mut root = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_5()
-            .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(self.render_header(&snap, locked, changed, cx))
-            .child(self.render_service(&snap, cx));
+        let model = cx.entity();
+        let tabs = TabBar::new("pages")
+            .underline()
+            .selected_index(match self.page {
+                Page::Home => 0,
+                Page::Settings => 1,
+            })
+            .child(Tab::new().label("Home"))
+            .child(Tab::new().label("Settings"))
+            .on_click(move |index, _window, cx| {
+                model.update(cx, |this, cx| {
+                    this.page = if *index == 1 { Page::Settings } else { Page::Home };
+                    cx.notify();
+                });
+            });
 
-        if let ServerStatus::Failed { error } = &self.status {
-            root = root.child(
-                Alert::error("service-failed", format!("Service failed.\n{error}")).banner(),
-            );
-        }
+        // Right padding keeps content clear of the overlay scrollbar.
+        let mut page = div().flex().flex_col().gap_3().pr_4();
 
+        // Config problems block both pages, so they show on either.
         if let Some(load_error) = &snap.load_error {
-            root = root.child(
+            page = page.child(
                 div()
                     .flex()
                     .flex_col()
@@ -1393,27 +1500,230 @@ impl Render for AppModel {
                     .child(
                         Button::new("retry-load")
                             .label("Retry")
-                            .on_click(cx.listener(|this, _, _window, cx| this.reload(cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
                     ),
             );
         }
 
-        if !locked && snap.entries.is_empty() {
-            root = root.child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("No MCP servers configured yet."),
-            );
-        }
+        page = match self.page {
+            Page::Home => page.child(self.render_home(&snap, cx)),
+            Page::Settings => page.child(self.render_settings(&snap, locked, cx)),
+        };
 
-        root = root.child(self.render_servers(&snap, locked, cx));
-        root = root.child(div().text_lg().child("Plugins"));
-        root = root.child(self.render_plugins(&snap, locked, cx));
-        root
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .py_5()
+            .px_6()
+            .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(self.render_header(&snap, locked, changed, cx))
+            .child(tabs)
+            .child(
+                div()
+                    .id("page")
+                    .flex_1()
+                    .min_h_0()
+                    .child(page)
+                    .overflow_y_scrollbar(),
+            )
     }
 }
 
 impl AppModel {
+    /// Home page: service status, a per-server status table and runtime failures.
+    fn render_home(&self, snap: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut home = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.render_service(snap, cx))
+            .child(self.render_status_table(snap, cx));
+        if let Some(hub) = &self.hub {
+            home = home.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("{} client sessions", hub.sessions)),
+            );
+        }
+        if let ServerStatus::Failed { error } = &self.status {
+            home = home.child(
+                Alert::error("service-failed", format!("Service failed.\n{error}")).banner(),
+            );
+        }
+        home
+    }
+
+    /// Mirrors `owlet status`: live hub data while running, otherwise the
+    /// draft config with no instances.
+    fn render_status_table(&self, snap: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        // (name, enabled, transport, scope, instances summary, instance details)
+        let rows: Vec<(String, bool, String, String, String, Option<String>)> = match &self.hub {
+            Some(hub) => hub
+                .servers
+                .iter()
+                .map(|s| {
+                    let mine: Vec<_> = hub.instances.iter().filter(|i| i.server == s.name).collect();
+                    let (summary, details) = if mine.is_empty() {
+                        ("-".to_owned(), None)
+                    } else {
+                        let running = mine.iter().filter(|i| i.running).count();
+                        let details = mine
+                            .iter()
+                            .map(|i| {
+                                let pid = i.pid.map_or_else(|| "-".to_owned(), |p| p.to_string());
+                                format!(
+                                    "{}: pid {pid}, {} sessions, {} in flight, idle {}s",
+                                    i.instance, i.sessions, i.inflight, i.idle_secs
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        (format!("{running}/{} running", mine.len()), Some(details))
+                    };
+                    (
+                        s.name.clone(),
+                        s.enabled,
+                        s.transport.clone(),
+                        s.scope.clone(),
+                        summary,
+                        details,
+                    )
+                })
+                .collect(),
+            None => snap
+                .entries
+                .iter()
+                .map(|e| {
+                    (
+                        e.name.clone(),
+                        e.server.enabled,
+                        transport_label(&e.server).to_owned(),
+                        scope_label(e.server.scope).to_owned(),
+                        "-".to_owned(),
+                        None,
+                    )
+                })
+                .collect(),
+        };
+
+        let header = TableHeader::new().child(
+            TableRow::new()
+                .child(TableHead::new().child("Name"))
+                .child(TableHead::new().child("State"))
+                .child(TableHead::new().child("Transport"))
+                .child(TableHead::new().child("Scope"))
+                .child(TableHead::new().child("Instances")),
+        );
+
+        let mut body = TableBody::new();
+        for (index, (name, enabled, transport, scope, summary, details)) in
+            rows.into_iter().enumerate()
+        {
+            let state = if enabled {
+                div().text_color(cx.theme().success).child("enabled")
+            } else {
+                div().text_color(cx.theme().danger).child("disabled")
+            };
+            let mut instances = div()
+                .id(SharedString::from(format!("instances-{index}")))
+                .child(summary);
+            if let Some(details) = details {
+                instances = instances
+                    .tooltip(move |window, cx| Tooltip::new(details.clone()).build(window, cx));
+            }
+            body = body.child(
+                TableRow::new()
+                    .child(TableCell::new().child(name))
+                    .child(TableCell::new().child(state))
+                    .child(TableCell::new().text_color(muted).child(transport))
+                    .child(TableCell::new().text_color(muted).child(scope))
+                    .child(TableCell::new().child(instances)),
+            );
+        }
+
+        Table::new().small().child(header).child(body)
+    }
+
+    /// Settings page: listen address, MCP servers and plugins.
+    fn render_settings(
+        &self,
+        snap: &Snapshot,
+        locked: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let section = |title: &str| div().text_lg().child(title.to_owned());
+
+        let mut listen = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_md()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().w_16().child("Address"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.listen_host).disabled(locked)),
+                    )
+                    .child(div().child("Port"))
+                    .child(
+                        div()
+                            .w_24()
+                            .child(Input::new(&self.listen_port).disabled(locked)),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Save, then Restart the service to apply. A non-loopback address requires a token."),
+            );
+        if let Some(err) = &self.listen_error {
+            listen = listen.child(div().text_sm().text_color(cx.theme().danger).child(err.clone()));
+        }
+
+        let servers_head = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(section("MCP servers"))
+            .child(
+                Button::new("add-server")
+                    .label("Add server")
+                    .disabled(locked)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_add_dialog(window, cx))),
+            );
+        let mut servers = div().flex().flex_col().gap_2();
+        if !locked && snap.entries.is_empty() {
+            servers = servers.child(div().text_color(muted).child("No MCP servers configured yet."));
+        }
+        servers = servers.child(self.render_servers(snap, locked, cx));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(section("Service"))
+            .child(listen)
+            .child(servers_head)
+            .child(servers)
+            .child(section("Plugins"))
+            .child(self.render_plugins(snap, locked, cx))
+    }
+
     fn render_header(
         &self,
         snap: &Snapshot,
@@ -1453,30 +1763,27 @@ impl AppModel {
             );
         }
 
-        // Check for updates button with three states.
-        let update_btn = if self.up_to_date {
-            Button::new("update").label("\u{2713} Up to date").disabled(true)
-        } else if self.updating {
-            Button::new("update").label("Updating\u{2026}").loading(true).disabled(true)
+        // Checking lives in the app menu; the toolbar only surfaces progress
+        // and a known update.
+        let update_btn = if self.updating {
+            Some(Button::new("update").label("Updating\u{2026}").loading(true).disabled(true))
         } else if self.checking {
-            Button::new("update").icon(IconName::RefreshCw).label("Checking\u{2026}").loading(true).disabled(true)
-        } else if let Some(info) = &self.update {
-            Button::new("update")
-                .label(format!("Update to {}", info.version()))
-                .on_click(cx.listener(|this, _, window, cx| this.on_check_updates(window, cx)))
+            Some(
+                Button::new("update")
+                    .label("Checking\u{2026}")
+                    .loading(true)
+                    .disabled(true),
+            )
         } else {
-            Button::new("update")
-                .label("Check for updates")
-                .on_click(cx.listener(|this, _, window, cx| this.on_check_updates(window, cx)))
+            self.update.as_ref().map(|info| {
+                Button::new("update")
+                    .label(format!("Update to {}", info.version()))
+                    .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx)))
+            })
         };
-        toolbar = toolbar.child(update_btn);
-
-        toolbar = toolbar.child(
-            Button::new("add-server")
-                .label("Add server")
-                .disabled(locked)
-                .on_click(cx.listener(|this, _, window, cx| this.open_add_dialog(window, cx))),
-        );
+        if let Some(update_btn) = update_btn {
+            toolbar = toolbar.child(update_btn);
+        }
 
         // Reload / Discard toggle.
         let reload_btn = if snap.dirty {
@@ -1490,7 +1797,7 @@ impl AppModel {
                 .icon(IconName::RefreshCw)
                 .label("Reload")
                 .loading(self.reloading)
-                .on_click(cx.listener(|this, _, _window, cx| this.reload(cx)))
+                .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx)))
         };
         toolbar = toolbar.child(reload_btn);
 
@@ -1505,7 +1812,7 @@ impl AppModel {
                 .icon(IconName::Check)
                 .label(save_label)
                 .loading(self.saving)
-                .disabled(locked || !snap.dirty || self.saving)
+                .disabled(locked || !snap.dirty || self.saving || self.listen_error.is_some())
                 .on_click(cx.listener(|this, _, _window, cx| this.save(cx))),
         );
 
@@ -1515,18 +1822,7 @@ impl AppModel {
             .justify_between()
             .items_center()
             .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(div().text_xl().child("Owlet"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(snap.path.clone()),
-                    ),
-            )
+            .child(div().text_xl().child("Owlet"))
             .child(toolbar)
     }
 
@@ -1841,8 +2137,8 @@ impl AppModel {
                 .show_cancel(true)
                 .ok_text("Discard")
                 .cancel_text("Cancel")
-                .on_ok(move |_, _window, cx| {
-                    model.update(cx, |this, cx| this.reload(cx));
+                .on_ok(move |_, window, cx| {
+                    model.update(cx, |this, cx| this.reload(window, cx));
                     true
                 })
         });
@@ -1865,6 +2161,16 @@ fn summary(s: &ServerConfig) -> String {
         let mut parts = vec![s.command.clone().unwrap_or_default()];
         parts.extend(s.args.iter().cloned());
         parts.join(" ")
+    }
+}
+
+/// Transport name as reported by `owlet status`.
+fn transport_label(s: &ServerConfig) -> &'static str {
+    match (&s.url, &s.wasm, s.transport.unwrap_or_default()) {
+        (Some(_), _, RemoteTransport::Http) => "http",
+        (Some(_), _, RemoteTransport::Sse) => "sse",
+        (None, Some(_), _) => "wasm",
+        (None, None, _) => "stdio",
     }
 }
 

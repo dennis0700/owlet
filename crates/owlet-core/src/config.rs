@@ -284,6 +284,44 @@ impl Config {
         write_atomic(path, &updated)
     }
 
+    /// Reads the `listen` address only; a missing file or key yields the default.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let listen = Config::load_listen(Path::new("owlet.toml"))?;
+    /// ```
+    pub fn load_listen(path: &Path) -> anyhow::Result<SocketAddr> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(default_listen()),
+            Err(e) => return Err(e).with_context(|| format!("read config {}", path.display())),
+        };
+        let cfg = Self::parse(&text).with_context(|| format!("parse {}", path.display()))?;
+        Ok(cfg.listen)
+    }
+
+    /// Sets `listen` in the config file, preserving comments and other keys.
+    /// The file is created when missing.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// Config::persist_listen(Path::new("owlet.toml"), "127.0.0.1:8808".parse()?)?;
+    /// ```
+    pub fn persist_listen(path: &Path, listen: SocketAddr) -> anyhow::Result<()> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).with_context(|| format!("read config {}", path.display())),
+        };
+        let updated = set_listen(&text, listen)?;
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+        write_atomic(path, &updated)
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         if !self.listen.ip().is_loopback() && self.token.is_none() {
             bail!(
@@ -483,9 +521,33 @@ fn set_enabled(text: &str, name: &str, enabled: bool) -> anyhow::Result<String> 
     Ok(out)
 }
 
+fn set_listen(text: &str, listen: SocketAddr) -> anyhow::Result<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().context("parse config")?;
+    doc.insert("listen", toml_edit::value(listen.to_string()));
+    let out = doc.to_string();
+    Config::parse(&out).context("edited config is invalid")?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edits_listen_preserving_the_rest() {
+        let text = "# top\n[servers.a]\ncommand = \"x\" # keep\n";
+        let addr: SocketAddr = "0.0.0.0:9000".parse().expect("addr");
+        let out = set_listen(text, addr).expect("set");
+        assert!(out.contains("# top") && out.contains("# keep"));
+        assert_eq!(Config::parse(&out).expect("parse").listen, addr);
+
+        let again = set_listen(&out, default_listen()).expect("set again");
+        assert_eq!(again.matches("listen").count(), 1);
+        assert_eq!(
+            Config::parse(&again).expect("parse").listen,
+            default_listen()
+        );
+    }
 
     #[test]
     fn edits_enabled_preserving_comments() {

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use gpui_kit::*;
 use owlet::Config;
-use owlet_gpui::{AppModel, Quit, ShowWindow};
+use owlet_gpui::{AppModel, CheckForUpdates, Quit, ShowWindow};
 
 /// Resolves the config file the UI edits: `$OWLET_CONFIG` if set, otherwise
 /// the platform default `~/.config/owlet/config.toml`.
@@ -65,7 +65,7 @@ fn main() {
             KeyBinding::new("ctrl-q", Quit, None),
         ]);
         let path = path.clone();
-        let (_window, model) = gpui_kit::open_window(
+        let (window, model) = gpui_kit::open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Owlet".into()),
@@ -90,6 +90,20 @@ fn main() {
             },
         )
         .expect("failed to open window");
+
+        // App menu: version, Check for Updates… (brings the window forward
+        // so its dialog/feedback is visible) and Quit (the global action).
+        cx.set_menus(owlet_gpui::app_menus());
+        let menu_model = model.clone();
+        cx.on_action(move |_: &CheckForUpdates, cx| {
+            show_window(cx);
+            let model = menu_model.clone();
+            if let Err(e) = window.update(cx, |_, window, cx| {
+                model.update(cx, |this, cx| this.check_for_updates(window, cx))
+            }) {
+                eprintln!("owlet-gpui: cannot check for updates: {e:#}");
+            }
+        });
 
         // Every quit path gracefully stops the embedded server first (same
         // path as the Stop button), then starts the new app if an update
