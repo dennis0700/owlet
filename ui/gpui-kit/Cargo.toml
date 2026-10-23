@@ -5,7 +5,7 @@ name = "owlet-gpui"
 # `check` job verifies this crate's version matches that tag too, so bump
 # both together.
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 
 # Deliberately empty so that `cargo build`/`cargo test` run from the repo root
 # (where `owlet`'s Cargo.toml has no [workspace] table) do not pull this crate
@@ -41,23 +41,35 @@ owlet = { path = "../.." }
 # fetched in this sandbox. Default features (component + assets) are used.
 # gpui-kit re-exports gpui/gpui-base/gpui-component/assets through
 # `use gpui_kit::*;`, so no separate gpui* dependency is declared.
-gpui-kit = "=0.7.3"
+gpui-kit = "0.8.0"
 
 anyhow = "1.0.104"
 axum = "0.8.9"
-parking_lot = "0.12.5"
-tokio = { version = "1.53.2", features = ["net", "rt", "rt-multi-thread", "sync", "time"] }
+parking_lot = "0.13.0"
+tokio = { version = "1.53.2", features = [
+    "net",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
 
 # The check-only updater talks to the GitHub Releases API. Versions pinned to
 # what the owlet dependency already resolves in this crate's lockfile; matching
 # owlet's `reqwest` feature set (default-features off + rustls) keeps the
 # dependency graph unchanged. `stream` is unified in by owlet, so it is not
 # requested here.
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "rustls",
+] }
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
 [dev-dependencies]
 tempfile = "3.27.0"
-tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "io-util"] }
+tokio = { version = "1.53.2", features = [
+    "macros",
+    "rt-multi-thread",
+    "io-util",
+] }

@@ -54,7 +54,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::p2::add_to_linker_sync;
 use wasmtime_wasi::{
-    DirPerms, FilePerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
+    FsPerms, ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView,
 };
 
 use self::owlet::plugin::http;
@@ -256,7 +256,7 @@ fn start_ticker(engine: &Engine) {
 pub(crate) fn validate(bytes: &[u8]) -> anyhow::Result<()> {
     Component::from_binary(engine()?, bytes)
         .map(drop)
-        .context("not a loadable wasm component")
+        .map_err(|e| e.context("not a loadable wasm component").into())
 }
 
 /// Compiled components by path, with the file's modification time.
@@ -276,7 +276,7 @@ fn load(path: &Path) -> anyhow::Result<Component> {
         return Ok(component.clone());
     }
     let component = Component::from_file(engine()?, path)
-        .with_context(|| format!("load wasm component {}", path.display()))?;
+        .map_err(|e| e.context(format!("load wasm component {}", path.display())))?;
     let mut cache = CACHE.lock();
     cache.retain(|file, (at, _)| {
         std::fs::metadata(file)
@@ -316,9 +316,9 @@ pub async fn start(
         .context("wasm compile task")??;
 
     let mut linker: Linker<Host> = Linker::new(engine);
-    add_to_linker_sync(&mut linker).context("add wasi to linker")?;
+    add_to_linker_sync(&mut linker).map_err(|e| e.context("add wasi to linker"))?;
     McpPlugin::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)
-        .context("add owlet http to linker")?;
+        .map_err(|e| e.context("add owlet http to linker"))?;
 
     let wasi = wasi_ctx(name, args, env, inherit_env, dirs);
     let Wiring {
@@ -376,7 +376,7 @@ fn wasi_ctx(
             warn!(server = %name, "skipping missing dir {}", host.display());
             continue;
         }
-        if let Err(e) = builder.preopened_dir(&host, guest, DirPerms::READ, FilePerms::READ) {
+        if let Err(e) = builder.preopened_dir(&host, guest, FsPerms::ReadOnly) {
             warn!(server = %name, "skipping dir {}: {e:#}", host.display());
         }
     }
@@ -450,13 +450,13 @@ fn run(
     store.set_epoch_deadline(1);
     store.epoch_deadline_callback(|mut ctx| {
         if ctx.data_mut().stopped() {
-            Err(anyhow!("plugin stopped"))
+            Err(wasmtime::Error::msg("plugin stopped"))
         } else {
             Ok(UpdateDeadline::Continue(1))
         }
     });
     let plugin = McpPlugin::instantiate(&mut store, component, linker)
-        .context("instantiate wasm component")?;
+        .map_err(|e| e.context("instantiate wasm component"))?;
     info!(server = %name, "wasm plugin loaded");
 
     // `true` when the loop ended between calls: stop while idle, or EOF.
@@ -484,7 +484,7 @@ fn run(
         let reply = match plugin.call_handle(&mut store, &line) {
             Ok(reply) => reply,
             Err(_) if store.data().stopping => break false,
-            Err(e) => return Err(e.context(format!("plugin `{name}` handle call failed"))),
+            Err(e) => return Err(e.context(format!("plugin `{name}` handle call failed")).into()),
         };
         for msg in reply.lines() {
             reader.dispatch_line(msg);
