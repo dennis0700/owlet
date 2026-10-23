@@ -163,7 +163,7 @@ plugin runs.
   with Hardened Runtime, so JIT memory is accepted and plugins run with no extra
   setup. This is the common case for Linux and for running the server directly.
 
-- **Desktop app (`ui/gpui-kit`)** — the gpui-kit app has no `.app`/`.dmg`
+- **Desktop app (`crates/owlet-gpui`)** — the gpui-kit app has no `.app`/`.dmg`
   bundle or Hardened Runtime signing today (see [Desktop UI](../README.md#desktop-ui)),
   so this concern does not currently apply to it; it runs the same as the
   plain CLI binary above. The entitlements below were specific to the former

@@ -47,6 +47,16 @@ flowchart LR
     SS -->|"GET stream + POST"| R2
 ```
 
+The repository is a Cargo workspace. The members under `crates/` are:
+
+- `owlet-core` (package `owlet`): the library with all the logic below — the hub, config, transports, HTTP endpoint and plugin host.
+- `owlet-cli`: the `owlet` binary; CLI parsing and server startup (`main.rs`).
+- `owlet-gpui`: the `owlet-gpui` desktop app, which depends on `owlet-core`.
+
+The WASM plugins in `plugins/` are built independently for `wasm32-wasip2` and are excluded from the workspace.
+
+The modules below live in `owlet-core` except for `main.rs`, which is in `owlet-cli`.
+
 | Module | Responsibility |
 |---|---|
 | `main.rs` | CLI parsing, `serve` startup, reaper task, graceful shutdown. |
@@ -401,10 +411,10 @@ flowchart LR
     BU --> R
 ```
 
-1. `check`: verifies that the tag matches the version in `Cargo.toml` and `ui/gpui-kit/Cargo.toml`, then runs clippy (`-D warnings`) and tests on Linux and macOS.
+1. `check`: verifies that the tag matches the version in `Cargo.toml`, then runs clippy (`-D warnings`) and tests on Linux and macOS.
 2. `build-linux`: builds `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with `cargo zigbuild`, using a pinned Zig release checked by sha256, and verifies that the binaries are statically linked. Zig also provides the C toolchain that `aws-lc-rs` (via rustls) needs, so cmake is not required.
 3. `build-macos`: builds the CLI for `aarch64-apple-darwin` on `macos-15`.
-4. `build-ui`: builds the gpui-kit desktop app for `aarch64-apple-darwin` on `macos-15` (a plain `cargo build --release` in `ui/gpui-kit`, its own Cargo workspace) and runs its tests, then packages the raw binary into a tarball with a `.sha256`. There is no `.app`/`.dmg` bundler for it yet; the desktop app's updater falls back to the GitHub release page when no matching bundle asset is published.
+4. `build-ui`: builds the gpui-kit desktop app (`owlet-gpui`) for `aarch64-apple-darwin` on `macos-15` and runs its tests, then packages the raw binary into a tarball with a `.sha256`. There is no `.app`/`.dmg` bundler for it yet; the desktop app's updater falls back to the GitHub release page when no matching bundle asset is published.
 5. `smoke`: runs each packaged CLI binary on a native runner for its architecture (`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`).
 6. `release`: uploads the CLI and UI tarballs, the plugin `.wasm` and the `.sha256` files to a GitHub Release. Tags containing `-` are marked as prereleases.
 

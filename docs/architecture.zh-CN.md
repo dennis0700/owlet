@@ -47,6 +47,16 @@ flowchart LR
     SS -->|"GET 流 + POST"| R2
 ```
 
+本仓库是一个 Cargo workspace。`crates/` 下的成员：
+
+- `owlet-core`（package 名 `owlet`）：包含下文所有逻辑的库——hub、配置、各传输、HTTP 端点和插件宿主。
+- `owlet-cli`：`owlet` 二进制；CLI 解析与服务启动（`main.rs`）。
+- `owlet-gpui`：`owlet-gpui` 桌面应用，依赖 `owlet-core`。
+
+`plugins/` 下的 WASM 插件按 `wasm32-wasip2` 独立构建，不属于该 workspace。
+
+下表中的模块除 `main.rs` 位于 `owlet-cli` 外，其余都在 `owlet-core`。
+
 | 模块 | 职责 |
 |---|---|
 | `main.rs` | CLI 解析、`serve` 启动、回收任务、优雅退出。 |
@@ -401,10 +411,10 @@ flowchart LR
     BU --> R
 ```
 
-1. `check`：确认 tag 与 `Cargo.toml`、`ui/gpui-kit/Cargo.toml` 里的版本一致，然后在 Linux 和 macOS 上运行 clippy（`-D warnings`）和测试。
+1. `check`：确认 tag 与 `Cargo.toml` 里的版本一致，然后在 Linux 和 macOS 上运行 clippy（`-D warnings`）和测试。
 2. `build-linux`：用 `cargo zigbuild` 构建 `x86_64-unknown-linux-musl` 和 `aarch64-unknown-linux-musl`。Zig 的版本固定，下载后校验 sha256。构建完检查产物是否为静态链接。Zig 同时提供 `aws-lc-rs`（经由 rustls 引入）所需的 C 工具链，所以不需要 cmake。
 3. `build-macos`：在 `macos-15` 上构建 `aarch64-apple-darwin` 的 CLI。
-4. `build-ui`：在 `macos-15` 上构建 `aarch64-apple-darwin` 的 gpui-kit 桌面应用（在独立 Cargo workspace `ui/gpui-kit` 里执行普通的 `cargo build --release`），运行它的测试，然后把原始二进制打包成 tar 包并附上 `.sha256`。目前还没有 `.app`/`.dmg` 打包步骤；找不到对应的打包资产时，桌面应用的更新检查会回退到 GitHub 发布页面。
+4. `build-ui`：在 `macos-15` 上构建 `aarch64-apple-darwin` 的 gpui-kit 桌面应用（`owlet-gpui`），运行它的测试，然后把原始二进制打包成 tar 包并附上 `.sha256`。目前还没有 `.app`/`.dmg` 打包步骤；找不到对应的打包资产时，桌面应用的更新检查会回退到 GitHub 发布页面。
 5. `smoke`：在各架构对应的原生 runner（`ubuntu-24.04`、`ubuntu-24.04-arm`、`macos-15`）上运行打包好的 CLI 二进制。
 6. `release`：把 CLI 和 UI 的 tar 包、插件 `.wasm` 以及 `.sha256` 文件上传到 GitHub Release，tag 中带 `-` 的标记为 prerelease。
 

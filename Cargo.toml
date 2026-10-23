@@ -1,10 +1,17 @@
-[package]
-name = "owlet"
+[workspace]
+resolver = "2"
+members = ["crates/owlet-core", "crates/owlet-cli", "crates/owlet-gpui"]
+# WASM plugins target wasm32-wasip2 and are built independently (see their
+# Cargo.toml). Keeping them out of the workspace stops a native `cargo build`
+# at the root from trying to compile their cdylib crates for the host target.
+exclude = ["plugins/echo", "plugins/aws"]
+
+[workspace.package]
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1.0.104"
 axum = "0.8.9"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -37,11 +44,7 @@ wasmtime = { version = "50.0.0", default-features = false, features = [
     "gc-drc",
 ] }
 wasmtime-wasi = "50.0.0"
-
-[target."cfg(unix)".dependencies]
 nix = { version = "0.31.3", features = ["signal"] }
-
-[dev-dependencies]
 http-body-util = "0.1.5"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }

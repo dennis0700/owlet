@@ -1,0 +1,18 @@
+[package]
+name = "owlet-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "owlet"
+path = "src/main.rs"
+
+[dependencies]
+owlet = { path = "../owlet-core" }
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

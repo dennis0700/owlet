@@ -7,10 +7,10 @@ ARG UV_VERSION=0.8
 FROM rust:${RUST_VERSION}-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
+    cargo build --release --locked -p owlet-cli \
     && cp target/release/owlet /usr/local/bin/owlet
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv

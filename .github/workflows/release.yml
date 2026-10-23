@@ -36,15 +36,6 @@ jobs:
             exit 1
           fi
 
-      - name: Check UI version matches the tag
-        shell: bash
-        run: |
-          version=$(grep -m1 '^version' ui/gpui-kit/Cargo.toml | cut -d'"' -f2)
-          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error file=ui/gpui-kit/Cargo.toml::tag ${GITHUB_REF_NAME} does not match version ${version}"
-            exit 1
-          fi
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -62,8 +53,8 @@ jobs:
           cargo build --locked --release --target wasm32-wasip2
           cp target/wasm32-wasip2/release/owlet_plugin_aws_mcp.wasm ../../tests/fixtures/aws-mcp.wasm
 
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets --workspace --exclude owlet-gpui -- -D warnings
+      - run: cargo test --locked --workspace --exclude owlet-gpui
 
       - name: Test aws-mcp plugin
         working-directory: plugins/aws
@@ -134,7 +125,7 @@ jobs:
           tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
 
       - name: Build
-        run: cargo zigbuild --locked --release --target ${{ matrix.target }}
+        run: cargo zigbuild --locked --release -p owlet-cli --target ${{ matrix.target }}
 
       - name: Verify static binary
         run: |
@@ -162,7 +153,7 @@ jobs:
           key: aarch64-apple-darwin
 
       - name: Build
-        run: cargo build --locked --release --target aarch64-apple-darwin
+        run: cargo build --locked --release -p owlet-cli --target aarch64-apple-darwin
 
       - uses: ./.github/actions/package
         with:
@@ -183,16 +174,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ui/gpui-kit
           key: ${{ env.TARGET }}
 
       - name: Test
-        working-directory: ui/gpui-kit
-        run: cargo test --locked --target ${{ env.TARGET }}
+        run: cargo test --locked -p owlet-gpui --target ${{ env.TARGET }}
 
       - name: Build
-        working-directory: ui/gpui-kit
-        run: cargo build --locked --release --target ${{ env.TARGET }}
+        run: cargo build --locked --release -p owlet-gpui --target ${{ env.TARGET }}
 
       # No .app/.dmg bundler exists for this gpui-kit crate yet (see FEAT-003
       # findings), so this packages the plain binary. The updater falls back
@@ -201,7 +189,7 @@ jobs:
         run: |
           name="owlet-ui-${GITHUB_REF_NAME}-${TARGET}"
           mkdir -p "dist-ui/${name}"
-          cp "ui/gpui-kit/target/${TARGET}/release/owlet-gpui" "dist-ui/${name}/"
+          cp "target/${TARGET}/release/owlet-gpui" "dist-ui/${name}/"
           tar -C dist-ui -czf "dist-ui/${name}.tar.gz" "${name}"
           (cd dist-ui && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
 

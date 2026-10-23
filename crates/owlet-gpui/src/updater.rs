@@ -8,9 +8,10 @@
 //! surfaces the version, release notes and a download URL. Installing is left
 //! to the user, who opens the download in their browser.
 //!
-//! The logic mirrors the root crate's `src/update.rs` GitHub Releases pattern
-//! (same repository, same release pipeline) but targets the UI's release
-//! asset (`owlet-ui-<tag>-<target>.dmg`) and never downloads or swaps files.
+//! The logic mirrors the `owlet-core` crate's `update.rs` GitHub Releases
+//! pattern (same repository, same release pipeline) but targets the UI's
+//! release asset (`owlet-ui-<tag>-<target>.dmg`) and never downloads or swaps
+//! files.
 
 use std::time::Duration;
 

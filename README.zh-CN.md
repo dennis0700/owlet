@@ -53,7 +53,7 @@ install -m 755 "owlet-${VERSION}-${TARGET}/owlet" ~/.local/bin/owlet
 从源码构建（需要 Rust 1.89 或更新版本）：
 
 ```bash
-cargo install --locked --git https://github.com/dennis0700/owlet
+cargo install --locked --git https://github.com/dennis0700/owlet owlet-cli
 ```
 
 在 Linux 上作为后台服务运行，见 [docs/systemd.zh-CN.md](docs/systemd.zh-CN.md)。用 Docker 运行，见 [docs/docker.zh-CN.md](docs/docker.zh-CN.md)。
@@ -275,13 +275,12 @@ sessions: 4
 
 ## 桌面 UI
 
-`ui/gpui-kit` 是一个纯 Rust 的 [gpui-kit](https://gpui-kit.com/docs) 应用，用来管理配置文件里的 `[servers]`，并在内部运行 owlet。它是独立的 Cargo workspace，所以在仓库根目录执行 `cargo build` 不需要它的工具链要求。
+`crates/owlet-gpui` 是一个纯 Rust 的 [gpui-kit](https://gpui-kit.com/docs) 应用，用来管理配置文件里的 `[servers]`，并在内部运行 owlet。
 
 自行构建：
 
 ```sh
-cd ui/gpui-kit
-cargo build --release    # 或：cargo run
+cargo build --release -p owlet-gpui    # 或：cargo run -p owlet-gpui
 ```
 
 - 编辑的是 `$OWLET_CONFIG` 指向的文件，未设置时为 `~/.config/owlet/config.toml`，路径会显示在窗口里。

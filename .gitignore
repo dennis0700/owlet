@@ -1,6 +1,6 @@
 /target
 /plugins/*/target
-/ui/gpui-kit/target
+/crates/*/target
 /.agents
 .kiro
 /semantic-review

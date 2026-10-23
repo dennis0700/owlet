@@ -1,0 +1,50 @@
+[package]
+name = "owlet-gpui"
+# Version comes from the workspace (root Cargo.toml), so it is always in sync
+# with the `owlet` CLI crate. The release workflow tags `v<version>` using the
+# workspace version.
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "owlet-gpui"
+path = "src/main.rs"
+
+[dependencies]
+owlet = { path = "../owlet-core" }
+
+# Pinned to the newest version available in the offline registry cache
+# (/Volumes/Zhitai/.cargo/registry/cache); 0.8.0 is not cached and cannot be
+# fetched in this sandbox. Default features (component + assets) are used.
+# gpui-kit re-exports gpui/gpui-base/gpui-component/assets through
+# `use gpui_kit::*;`, so no separate gpui* dependency is declared.
+gpui-kit = "0.8.0"
+
+anyhow.workspace = true
+axum.workspace = true
+parking_lot.workspace = true
+tokio = { version = "1.53.2", features = [
+    "net",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+
+# The check-only updater talks to the GitHub Releases API. Matching owlet's
+# `reqwest` feature set (default-features off + rustls) keeps the dependency
+# graph unchanged. `stream` is unified in by owlet, so it is not requested here.
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "rustls",
+] }
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1.53.2", features = [
+    "macros",
+    "rt-multi-thread",
+    "io-util",
+] }

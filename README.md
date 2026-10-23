@@ -53,7 +53,7 @@ On macOS, a binary downloaded with a browser may be quarantined. Remove the flag
 To build from source (Rust 1.89 or newer):
 
 ```bash
-cargo install --locked --git https://github.com/dennis0700/owlet
+cargo install --locked --git https://github.com/dennis0700/owlet owlet-cli
 ```
 
 To run owlet as a background service on Linux, see [docs/systemd.md](docs/systemd.md). To run it with Docker, see [docs/docker.md](docs/docker.md).
@@ -276,13 +276,12 @@ sessions: 4
 
 ## Desktop UI
 
-`ui/gpui-kit` contains a pure-Rust [gpui-kit](https://gpui-kit.com/docs) app for managing the `[servers]` table of the config file and running owlet inside it. It is a separate Cargo workspace, so `cargo build` at the repository root does not need its toolchain requirements.
+`crates/owlet-gpui` contains a pure-Rust [gpui-kit](https://gpui-kit.com/docs) app for managing the `[servers]` table of the config file and running owlet inside it.
 
 To build it yourself:
 
 ```sh
-cd ui/gpui-kit
-cargo build --release    # or: cargo run
+cargo build --release -p owlet-gpui    # or: cargo run -p owlet-gpui
 ```
 
 - It edits the file given by `$OWLET_CONFIG`, or `~/.config/owlet/config.toml` by default. The path is shown in the window.

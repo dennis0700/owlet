@@ -1,0 +1,37 @@
+[package]
+name = "owlet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+tar.workspace = true
+tokio.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+
+[target."cfg(unix)".dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tower.workspace = true

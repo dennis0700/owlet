@@ -289,7 +289,7 @@ mod tests {
     use crate::Config;
 
     fn fixture() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/aws-mcp.wasm")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/aws-mcp.wasm")
     }
 
     fn aws() -> &'static Plugin {
