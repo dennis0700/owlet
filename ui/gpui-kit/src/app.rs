@@ -7,8 +7,11 @@ use std::time::Duration;
 
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::collapsible::Collapsible;
 use gpui_kit::component::dialog::Dialog;
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{IconName, Sizable};
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::theme::ActiveTheme;
@@ -26,6 +29,66 @@ use crate::updater::{self, UpdateInfo, Updater};
 /// registers visually. Mirrors the React `MIN_SPIN_MS`.
 const MIN_SPIN: Duration = Duration::from_millis(600);
 
+/// A collapsible list of single-value rows (arguments, inherited env names,
+/// read-only directories). Each row is one retained input entity.
+struct ListField {
+    rows: Vec<Entity<InputState>>,
+    collapsed: bool,
+}
+
+/// A collapsible list of `key`/`value` rows (environment, headers). Each row
+/// holds two retained input entities.
+struct PairField {
+    rows: Vec<(Entity<InputState>, Entity<InputState>)>,
+    collapsed: bool,
+}
+
+impl ListField {
+    /// Joins the non-empty, trimmed rows into the `\n`-separated text the
+    /// `form` module parses. The dialog's live `collapsed` flag has no effect
+    /// on the value.
+    fn value(&self, cx: &App) -> String {
+        self.rows
+            .iter()
+            .map(|r| r.read(cx).value().trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+impl PairField {
+    /// Joins the rows into `KEY<sep>VALUE` lines, skipping rows with an empty
+    /// key, matching what the `form` module's parser expects.
+    fn value(&self, cx: &App, sep: &str) -> String {
+        self.rows
+            .iter()
+            .filter_map(|(k, v)| {
+                let key = k.read(cx).value().trim().to_owned();
+                (!key.is_empty())
+                    .then(|| format!("{key}{sep}{}", v.read(cx).value().trim()))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Names a single-value list field so one set of add/remove handlers can serve
+/// all three.
+#[derive(Clone, Copy)]
+enum ListId {
+    Args,
+    InheritEnv,
+    Dirs,
+}
+
+/// Names a key/value list field.
+#[derive(Clone, Copy)]
+enum PairId {
+    Env,
+    Headers,
+}
+
 /// Editable text fields of the server dialog, kept as retained entities so
 /// their contents survive dialog-layer rebuilds.
 struct DialogInputs {
@@ -35,11 +98,43 @@ struct DialogInputs {
     wasm: Entity<InputState>,
     url: Entity<InputState>,
     idle_timeout: Entity<InputState>,
-    args: Entity<TextareaState>,
-    env: Entity<TextareaState>,
-    inherit_env: Entity<TextareaState>,
-    dirs: Entity<TextareaState>,
-    headers: Entity<TextareaState>,
+    args: ListField,
+    env: PairField,
+    inherit_env: ListField,
+    dirs: ListField,
+    headers: PairField,
+}
+
+impl DialogInputs {
+    fn list_mut(&mut self, id: ListId) -> &mut ListField {
+        match id {
+            ListId::Args => &mut self.args,
+            ListId::InheritEnv => &mut self.inherit_env,
+            ListId::Dirs => &mut self.dirs,
+        }
+    }
+
+    fn list_mut_ref(&self, id: ListId) -> &ListField {
+        match id {
+            ListId::Args => &self.args,
+            ListId::InheritEnv => &self.inherit_env,
+            ListId::Dirs => &self.dirs,
+        }
+    }
+
+    fn pair_mut(&mut self, id: PairId) -> &mut PairField {
+        match id {
+            PairId::Env => &mut self.env,
+            PairId::Headers => &mut self.headers,
+        }
+    }
+
+    fn pair_mut_ref(&self, id: PairId) -> &PairField {
+        match id {
+            PairId::Env => &self.env,
+            PairId::Headers => &self.headers,
+        }
+    }
 }
 
 /// Open server dialog: the editing target plus the non-text form state that
@@ -63,15 +158,15 @@ impl ServerForm {
             kind: self.kind,
             enabled: self.enabled,
             command: self.inputs.command.read(cx).value().to_string(),
-            args: self.inputs.args.read(cx).value().to_string(),
-            env: self.inputs.env.read(cx).value().to_string(),
+            args: self.inputs.args.value(cx),
+            env: self.inputs.env.value(cx, "="),
             cwd: self.inputs.cwd.read(cx).value().to_string(),
             wasm: self.inputs.wasm.read(cx).value().to_string(),
-            inherit_env: self.inputs.inherit_env.read(cx).value().to_string(),
-            dirs: self.inputs.dirs.read(cx).value().to_string(),
+            inherit_env: self.inputs.inherit_env.value(cx),
+            dirs: self.inputs.dirs.value(cx),
             url: self.inputs.url.read(cx).value().to_string(),
             transport: self.transport,
-            headers: self.inputs.headers.read(cx).value().to_string(),
+            headers: self.inputs.headers.value(cx, ": "),
             scope: self.scope,
             idle_timeout: self.inputs.idle_timeout.read(cx).value().to_string(),
             cache_lists: self.cache_lists,
@@ -109,6 +204,8 @@ pub struct AppModel {
     _install: Option<Task<()>>,
     _restart: Option<Task<()>>,
     _check: Option<Task<()>>,
+    _reload: Option<Task<()>>,
+    _save: Option<Task<()>>,
 }
 
 impl AppModel {
@@ -174,6 +271,8 @@ impl AppModel {
             _install: None,
             _restart: None,
             _check: None,
+            _reload: None,
+            _save: None,
         };
         model.start_background_update_check(cx);
         let _ = window;
@@ -216,16 +315,42 @@ impl AppModel {
     // --- Store operations -------------------------------------------------
 
     fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.reloading {
+            return;
+        }
         self.store.reload();
         self.clear_banners();
+        // The reload itself is instant; keep the spinner up for MIN_SPIN so
+        // the action still registers visually, like the old UI.
+        self.reloading = true;
         cx.notify();
+        self._reload = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MIN_SPIN).await;
+            let _ = this.update(cx, |this, cx| {
+                this.reloading = false;
+                cx.notify();
+            });
+        }));
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
         match self.store.save() {
             Ok(()) => self.set_notice("Saved.", cx),
             Err(e) => self.set_error(format!("{e:#}"), cx),
         }
+        // Instant save; hold the spinner for MIN_SPIN for visible feedback.
+        self.saving = true;
+        cx.notify();
+        self._save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MIN_SPIN).await;
+            let _ = this.update(cx, |this, cx| {
+                this.saving = false;
+                cx.notify();
+            });
+        }));
     }
 
     fn set_enabled(&mut self, name: &str, enabled: bool, cx: &mut Context<Self>) {
@@ -501,14 +626,39 @@ impl AppModel {
                     .default_value(text)
             })
         };
-        let multi = |text: &str, placeholder: &str, window: &mut Window, cx: &mut Context<Self>| {
-            let text = text.to_owned();
-            let placeholder = placeholder.to_owned();
-            cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .placeholder(placeholder)
-                    .default_value(text)
-            })
+        // One input entity per non-empty line. An empty field yields no rows;
+        // the dialog then shows a single "add" button to create the first one.
+        let list = |text: &str, placeholder: &str, window: &mut Window, cx: &mut Context<Self>| {
+            let rows: Vec<Entity<InputState>> = text
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .map(|l| single(l, placeholder, window, cx))
+                .collect();
+            ListField {
+                rows,
+                collapsed: true,
+            }
+        };
+        // Splits each `KEY<sep>VALUE` line (at the first `sep`) into a key and
+        // a value input; an empty field yields no rows.
+        let pairs = |text: &str, sep: char, window: &mut Window, cx: &mut Context<Self>| {
+            let rows: Vec<(Entity<InputState>, Entity<InputState>)> = text
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .map(|l| match l.split_once(sep) {
+                    Some((k, v)) => (
+                        single(k.trim(), "KEY", window, cx),
+                        single(v.trim(), "VALUE", window, cx),
+                    ),
+                    None => (single(l, "KEY", window, cx), single("", "VALUE", window, cx)),
+                })
+                .collect();
+            PairField {
+                rows,
+                collapsed: true,
+            }
         };
 
         let inputs = DialogInputs {
@@ -518,11 +668,11 @@ impl AppModel {
             wasm: single(&values.wasm, "~/.config/owlet/plugins/aws-mcp.wasm", window, cx),
             url: single(&values.url, "https://example.com/mcp", window, cx),
             idle_timeout: single(&values.idle_timeout, "", window, cx),
-            args: multi(&values.args, "mcp-server-fetch", window, cx),
-            env: multi(&values.env, "", window, cx),
-            inherit_env: multi(&values.inherit_env, "AWS_*", window, cx),
-            dirs: multi(&values.dirs, "~/.aws", window, cx),
-            headers: multi(&values.headers, "", window, cx),
+            args: list(&values.args, "mcp-server-fetch", window, cx),
+            env: pairs(&values.env, '=', window, cx),
+            inherit_env: list(&values.inherit_env, "AWS_*", window, cx),
+            dirs: list(&values.dirs, "~/.aws", window, cx),
+            headers: pairs(&values.headers, ':', window, cx),
         };
 
         self.form = Some(ServerForm {
@@ -576,6 +726,259 @@ impl AppModel {
         cx.notify();
     }
 
+    /// Appends a blank row to a single-value list field.
+    /// Inserts a blank row at `at` in a single-value list field (clamped to
+    /// the current length).
+    fn add_list_row(&mut self, id: ListId, at: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            let row = cx.new(|cx| InputState::new(window, cx));
+            let rows = &mut form.inputs.list_mut(id).rows;
+            rows.insert(at.min(rows.len()), row);
+        }
+        cx.notify();
+    }
+
+    /// Removes row `index` from a single-value list field. The field may end
+    /// up empty, which the dialog renders as a single "add" button.
+    fn remove_list_row(&mut self, id: ListId, index: usize, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            let rows = &mut form.inputs.list_mut(id).rows;
+            if index < rows.len() {
+                rows.remove(index);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Inserts a blank key/value row at `at` in a pair field.
+    fn add_pair_row(&mut self, id: PairId, at: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            let key = cx.new(|cx| InputState::new(window, cx));
+            let value = cx.new(|cx| InputState::new(window, cx));
+            let rows = &mut form.inputs.pair_mut(id).rows;
+            rows.insert(at.min(rows.len()), (key, value));
+        }
+        cx.notify();
+    }
+
+    /// Removes row `index` from a pair field; the field may end up empty.
+    fn remove_pair_row(&mut self, id: PairId, index: usize, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            let rows = &mut form.inputs.pair_mut(id).rows;
+            if index < rows.len() {
+                rows.remove(index);
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_list_collapsed(&mut self, id: ListId, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            let field = form.inputs.list_mut(id);
+            field.collapsed = !field.collapsed;
+        }
+        cx.notify();
+    }
+
+    fn toggle_pair_collapsed(&mut self, id: PairId, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            let field = form.inputs.pair_mut(id);
+            field.collapsed = !field.collapsed;
+        }
+        cx.notify();
+    }
+
+    /// Renders a collapsible single-value list field: a clickable header with
+    /// a chevron, then one input per row with a remove button, and an "Add"
+    /// button at the bottom.
+    fn render_list_field(
+        &self,
+        id: ListId,
+        key: &'static str,
+        label: &str,
+        hint: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let Some(form) = &self.form else {
+            return div().into_any_element();
+        };
+        let field = form.inputs.list_mut_ref(id);
+        let collapsed = field.collapsed;
+        let count = field.rows.len();
+
+        let hint = hint.to_owned();
+        let header = div()
+            .id(SharedString::from(format!("{key}-header")))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .child(
+                div()
+                    .w_3()
+                    .text_color(muted)
+                    .child(if collapsed { "\u{203A}" } else { "\u{2304}" }),
+            )
+            .child(label.to_owned())
+            .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.toggle_list_collapsed(id, cx)
+            }));
+
+        let mut rows = div().flex().flex_col().gap_1();
+        if count == 0 {
+            // Empty field: a single button to create the first row.
+            rows = rows.child(
+                Button::new(SharedString::from(format!("{key}-add-first")))
+                    .outline()
+                    .small()
+                    .label("Add")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.add_list_row(id, 0, window, cx)
+                    })),
+            );
+        }
+        for index in 0..count {
+            let row_input = {
+                let form = self.form.as_ref().expect("form present");
+                form.inputs.list_mut_ref(id).rows[index].clone()
+            };
+            rows = rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().flex_1().child(Input::new(&row_input)))
+                    .child(
+                        Button::new(SharedString::from(format!("{key}-del-{index}")))
+                            .danger()
+                            .label("\u{2212}")
+                            .tooltip("Remove")
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.remove_list_row(id, index, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{key}-add-{index}")))
+                            .outline()
+                            .label("+")
+                            .tooltip("Add")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.add_list_row(id, index + 1, window, cx)
+                            })),
+                    ),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(header)
+            .child(
+                Collapsible::new()
+                    .open(!collapsed)
+                    .content(rows.into_any_element()),
+            )
+            .into_any_element()
+    }
+
+    /// Renders a collapsible key/value list field (environment, headers).
+    fn render_pair_field(
+        &self,
+        id: PairId,
+        key: &'static str,
+        label: &str,
+        hint: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let Some(form) = &self.form else {
+            return div().into_any_element();
+        };
+        let field = form.inputs.pair_mut_ref(id);
+        let collapsed = field.collapsed;
+        let count = field.rows.len();
+
+        let hint = hint.to_owned();
+        let header = div()
+            .id(SharedString::from(format!("{key}-header")))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .child(
+                div()
+                    .w_3()
+                    .text_color(muted)
+                    .child(if collapsed { "\u{203A}" } else { "\u{2304}" }),
+            )
+            .child(label.to_owned())
+            .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.toggle_pair_collapsed(id, cx)
+            }));
+
+        let mut rows = div().flex().flex_col().gap_1();
+        if count == 0 {
+            rows = rows.child(
+                Button::new(SharedString::from(format!("{key}-add-first")))
+                    .outline()
+                    .small()
+                    .label("Add")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.add_pair_row(id, 0, window, cx)
+                    })),
+            );
+        }
+        for index in 0..count {
+            let (key_input, value_input) = {
+                let form = self.form.as_ref().expect("form present");
+                let (k, v) = &form.inputs.pair_mut_ref(id).rows[index];
+                (k.clone(), v.clone())
+            };
+            rows = rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().flex_1().child(Input::new(&key_input)))
+                    .child(div().flex_1().child(Input::new(&value_input)))
+                    .child(
+                        Button::new(SharedString::from(format!("{key}-del-{index}")))
+                            .danger()
+                            .label("\u{2212}")
+                            .tooltip("Remove")
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.remove_pair_row(id, index, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{key}-add-{index}")))
+                            .outline()
+                            .label("+")
+                            .tooltip("Add")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.add_pair_row(id, index + 1, window, cx)
+                            })),
+                    ),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(header)
+            .child(
+                Collapsible::new()
+                    .open(!collapsed)
+                    .content(rows.into_any_element()),
+            )
+            .into_any_element()
+    }
+
     fn render_server_dialog(&mut self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
         let Some(form) = &self.form else {
             return dialog;
@@ -588,10 +991,16 @@ impl AppModel {
         let scope = form.scope;
         let is_command = kind == Kind::Command;
 
+        let muted = cx.theme().muted_foreground;
         let field = |label: &str, hint: Option<&str>, control: AnyElement| {
-            let mut head = div().flex().gap_1().child(label.to_owned());
+            let mut head = div().flex().items_baseline().gap_1().child(label.to_owned());
             if let Some(hint) = hint {
-                head = head.child(div().text_xs().child(hint.to_owned()));
+                head = head.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(hint.to_owned()),
+                );
             }
             div()
                 .flex()
@@ -670,15 +1079,19 @@ impl AppModel {
                         None,
                         Input::new(&form.inputs.command).into_any_element(),
                     ))
-                    .child(field(
+                    .child(self.render_list_field(
+                        ListId::Args,
+                        "cmd-args",
                         "Arguments",
-                        Some("one per line"),
-                        Textarea::new(&form.inputs.args).into_any_element(),
+                        "one per line",
+                        cx,
                     ))
-                    .child(field(
+                    .child(self.render_pair_field(
+                        PairId::Env,
+                        "cmd-env",
                         "Environment",
-                        Some("KEY=VALUE per line"),
-                        Textarea::new(&form.inputs.env).into_any_element(),
+                        "KEY / VALUE",
+                        cx,
                     ))
                     .child(field(
                         "Working directory",
@@ -716,10 +1129,12 @@ impl AppModel {
                         Input::new(&form.inputs.url).into_any_element(),
                     ))
                     .child(field("Transport", None, transport_radio.into_any_element()))
-                    .child(field(
+                    .child(self.render_pair_field(
+                        PairId::Headers,
+                        "url-headers",
                         "Headers",
-                        Some("Key: Value per line"),
-                        Textarea::new(&form.inputs.headers).into_any_element(),
+                        "Key / Value",
+                        cx,
                     ));
             }
             Kind::Wasm => {
@@ -729,25 +1144,33 @@ impl AppModel {
                         None,
                         Input::new(&form.inputs.wasm).into_any_element(),
                     ))
-                    .child(field(
+                    .child(self.render_list_field(
+                        ListId::Args,
+                        "wasm-args",
                         "Arguments",
-                        Some("one per line"),
-                        Textarea::new(&form.inputs.args).into_any_element(),
+                        "one per line",
+                        cx,
                     ))
-                    .child(field(
+                    .child(self.render_pair_field(
+                        PairId::Env,
+                        "wasm-env",
                         "Environment",
-                        Some("KEY=VALUE per line"),
-                        Textarea::new(&form.inputs.env).into_any_element(),
+                        "KEY / VALUE",
+                        cx,
                     ))
-                    .child(field(
+                    .child(self.render_list_field(
+                        ListId::InheritEnv,
+                        "wasm-inherit",
                         "Inherited environment",
-                        Some("host variable names, PREFIX* allowed, one per line"),
-                        Textarea::new(&form.inputs.inherit_env).into_any_element(),
+                        "host variable names, PREFIX* allowed",
+                        cx,
                     ))
-                    .child(field(
+                    .child(self.render_list_field(
+                        ListId::Dirs,
+                        "wasm-dirs",
                         "Read-only directories",
-                        Some("one per line"),
-                        Textarea::new(&form.inputs.dirs).into_any_element(),
+                        "one per line",
+                        cx,
                     ));
             }
         }
@@ -817,6 +1240,7 @@ impl AppModel {
         let model = cx.entity();
         dialog
             .title(title)
+            .width(px(560.))
             .child(body)
             .footer(footer)
             .on_cancel(move |_, _window, cx| {
@@ -876,12 +1300,6 @@ impl Render for AppModel {
             );
         }
 
-        if let Some(error) = &self.error {
-            root = root.child(Alert::error("error-banner", error.clone()).banner());
-        } else if let Some(notice) = &self.notice {
-            root = root.child(Alert::success("notice-banner", notice.clone()).banner());
-        }
-
         if !locked && snap.entries.is_empty() {
             root = root.child(
                 div()
@@ -907,6 +1325,28 @@ impl AppModel {
     ) -> impl IntoElement {
         let mut toolbar = div().flex().items_center().gap_2();
 
+        // Transient status feedback (save/reload/install results) shows here,
+        // left of the toolbar buttons: green for a notice, red for an error.
+        let feedback = if let Some(error) = &self.error {
+            Some((error.clone(), cx.theme().danger))
+        } else {
+            self.notice
+                .as_ref()
+                .map(|n| (n.clone(), cx.theme().success))
+        };
+        if let Some((message, color)) = feedback {
+            toolbar = toolbar.child(
+                div()
+                    .max_w_96()
+                    .text_sm()
+                    .text_color(color)
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(message),
+            );
+        }
+
         if snap.dirty {
             toolbar = toolbar.child(
                 div()
@@ -919,7 +1359,7 @@ impl AppModel {
         let update_btn = if self.up_to_date {
             Button::new("update").label("\u{2713} Up to date").disabled(true)
         } else if self.checking {
-            Button::new("update").label("Checking\u{2026}").loading(true).disabled(true)
+            Button::new("update").icon(IconName::RefreshCw).label("Checking\u{2026}").loading(true).disabled(true)
         } else if let Some(info) = &self.update {
             Button::new("update")
                 .label(format!("Update to {}", info.version()))
@@ -941,11 +1381,13 @@ impl AppModel {
         // Reload / Discard toggle.
         let reload_btn = if snap.dirty {
             Button::new("reload")
+                .icon(IconName::RefreshCw)
                 .label("Discard")
                 .loading(self.reloading)
                 .on_click(cx.listener(|this, _, window, cx| this.confirm_discard(window, cx)))
         } else {
             Button::new("reload")
+                .icon(IconName::RefreshCw)
                 .label("Reload")
                 .loading(self.reloading)
                 .on_click(cx.listener(|this, _, _window, cx| this.reload(cx)))
@@ -960,7 +1402,9 @@ impl AppModel {
         toolbar = toolbar.child(
             Button::new("save")
                 .primary()
+                .icon(IconName::Check)
                 .label(save_label)
+                .loading(self.saving)
                 .disabled(locked || !snap.dirty || self.saving)
                 .on_click(cx.listener(|this, _, _window, cx| this.save(cx))),
         );
@@ -1002,18 +1446,23 @@ impl AppModel {
 
         let toggle = if running || starting {
             Button::new("stop")
+                .icon(IconName::Square)
                 .label("Stop")
+                .loading(starting)
                 .disabled(busy)
                 .on_click(cx.listener(|this, _, _window, cx| this.stop_server(cx)))
         } else {
             Button::new("start")
+                .icon(IconName::Play)
                 .label("Start")
+                .loading(starting)
                 .disabled(busy)
                 .on_click(cx.listener(|this, _, _window, cx| this.start_server(cx)))
         };
 
         let restart_disabled = busy || snap.dirty;
         let restart = Button::new("restart")
+            .icon(IconName::RotateCw)
             .label("Restart")
             .loading(self.restarting)
             .disabled(restart_disabled)
@@ -1033,9 +1482,9 @@ impl AppModel {
             .border_1()
             .border_color(cx.theme().border)
             .rounded_md()
-            .child(div().size_2().rounded_full().bg(dot_color))
+            .child(div().size_2().flex_shrink_0().rounded_full().bg(dot_color))
             .child(div().flex_1().child(text))
-            .child(div().flex().gap_2().child(toggle).child(restart))
+            .child(div().flex().flex_shrink_0().gap_2().child(toggle).child(restart))
     }
 
     fn render_servers(
@@ -1082,11 +1531,15 @@ impl AppModel {
             .flex_col()
             .gap_1()
             .flex_1()
+            .min_w_0()
             .child(title)
             .child(
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
                     .child(summary),
             );
 
@@ -1096,6 +1549,7 @@ impl AppModel {
         let controls = div()
             .flex()
             .items_center()
+            .flex_shrink_0()
             .gap_2()
             .child(
                 Button::new(SharedString::from(format!("edit-{name}")))

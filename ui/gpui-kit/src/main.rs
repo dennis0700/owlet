@@ -24,7 +24,9 @@ fn config_path() -> PathBuf {
 
 fn main() {
     let path = config_path();
-    gpui_kit::application().run(move |cx| {
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
         gpui_kit::init(cx);
         let path = path.clone();
         let (_window, model) = gpui_kit::open_window(
@@ -33,6 +35,11 @@ fn main() {
                     title: Some("Owlet".into()),
                     ..Default::default()
                 }),
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    size(px(760.), px(820.)),
+                    cx,
+                ))),
                 ..Default::default()
             },
             cx,
