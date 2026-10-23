@@ -154,11 +154,10 @@ curl -s -X POST http://127.0.0.1:8808/mcp/echo \
   签名,JIT 内存被接受,插件无需额外设置即可运行。这是 Linux 以及直接运行服务器
   的常见场景。
 
-- **桌面应用（`crates/owlet-gpui`）** —— gpui-kit 应用目前没有 `.app`/`.dmg` 打包，也
-  没有 Hardened Runtime 签名（见[桌面 UI](../README.zh-CN.md#桌面-ui)），所以这
-  个问题目前不适用于它；它的运行方式和上面的纯 CLI 二进制一样。下面的
-  entitlement 是以前 Tauri 打包时用的，留在这里仅作参考，以防将来给这个应用做
-  签名打包时需要：
+- **桌面应用（`crates/owlet-gpui`）** —— `bundle-macos.sh` 给 `Owlet.app` 做的是
+  ad-hoc 签名，*没有*开启 Hardened Runtime，所以这个问题目前不适用于它；它的运行
+  方式和上面的纯 CLI 二进制一样。下面的 entitlement 是以前 Tauri 打包时用的，留在
+  这里仅作参考，以防将来加上 Hardened Runtime 签名（比如为了公证）时需要：
 
   ```xml
   <key>com.apple.security.cs.allow-jit</key>

@@ -414,7 +414,7 @@ flowchart LR
 1. `check`: verifies that the tag matches the version in `Cargo.toml`, then runs clippy (`-D warnings`) and tests on Linux and macOS.
 2. `build-linux`: builds `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with `cargo zigbuild`, using a pinned Zig release checked by sha256, and verifies that the binaries are statically linked. Zig also provides the C toolchain that `aws-lc-rs` (via rustls) needs, so cmake is not required.
 3. `build-macos`: builds the CLI for `aarch64-apple-darwin` on `macos-15`.
-4. `build-ui`: builds the gpui-kit desktop app (`owlet-gpui`) for `aarch64-apple-darwin` on `macos-15` and runs its tests, then packages the raw binary into a tarball with a `.sha256`. There is no `.app`/`.dmg` bundler for it yet; the desktop app's updater falls back to the GitHub release page when no matching bundle asset is published.
+4. `build-ui`: builds the gpui-kit desktop app (`owlet-gpui`) for `aarch64-apple-darwin` on `macos-15` and runs its tests, then packages it with `crates/owlet-gpui/bundle-macos.sh` into an ad-hoc signed `Owlet.app` inside `owlet-ui-<tag>-aarch64-apple-darwin.dmg`, with a `.sha256`. The desktop app's update check links to this `.dmg`, falling back to the GitHub release page when it is missing.
 5. `smoke`: runs each packaged CLI binary on a native runner for its architecture (`ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`).
 6. `release`: uploads the CLI and UI tarballs, the plugin `.wasm` and the `.sha256` files to a GitHub Release. Tags containing `-` are marked as prereleases.
 

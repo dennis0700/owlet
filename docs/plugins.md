@@ -163,12 +163,11 @@ plugin runs.
   with Hardened Runtime, so JIT memory is accepted and plugins run with no extra
   setup. This is the common case for Linux and for running the server directly.
 
-- **Desktop app (`crates/owlet-gpui`)** — the gpui-kit app has no `.app`/`.dmg`
-  bundle or Hardened Runtime signing today (see [Desktop UI](../README.md#desktop-ui)),
-  so this concern does not currently apply to it; it runs the same as the
-  plain CLI binary above. The entitlements below were specific to the former
-  Tauri bundle and are kept here only as a reference in case a signed bundle
-  is built for this app in the future:
+- **Desktop app (`crates/owlet-gpui`)** — `bundle-macos.sh` ad-hoc signs
+  `Owlet.app` *without* Hardened Runtime, so this concern does not currently
+  apply to it; it runs the same as the plain CLI binary above. The entitlements
+  below were specific to the former Tauri bundle and are kept here only as a
+  reference in case Hardened Runtime signing (e.g. for notarization) is added:
 
   ```xml
   <key>com.apple.security.cs.allow-jit</key>

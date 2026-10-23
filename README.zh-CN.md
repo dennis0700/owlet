@@ -60,9 +60,9 @@ cargo install --locked --git https://github.com/dennis0700/owlet owlet-cli
 
 ### 桌面应用（macOS）
 
-从 Releases 下载 `owlet-ui-<version>-aarch64-apple-darwin.tar.gz`（仅支持 Apple Silicon），解压后运行里面的 `owlet-gpui` 二进制文件。应用内部自带 owlet，不需要另外安装 CLI。功能见[桌面 UI](#桌面-ui)。
+从 Releases 下载 `owlet-ui-<version>-aarch64-apple-darwin.dmg`（仅支持 Apple Silicon），打开后把 `Owlet.app` 拖到“应用程序”。应用内部自带 owlet，不需要另外安装 CLI。功能见[桌面 UI](#桌面-ui)。
 
-目前还没有签名/公证的 `.app` 包，所以从 Finder 运行解压出来的二进制文件时 macOS 可能会提示无法验证开发者；在“系统设置 → 隐私与安全性”里允许即可，或者用 `xattr -d com.apple.quarantine owlet-gpui` 去掉隔离标记。
+应用只做了 ad-hoc 签名，没有公证，所以第一次打开时 macOS 可能会拒绝；在“系统设置 → 隐私与安全性”里允许即可，或者用 `xattr -dr com.apple.quarantine /Applications/Owlet.app` 去掉隔离标记。
 
 其他平台请从源码构建 UI（见[桌面 UI](#桌面-ui)）。
 

@@ -182,22 +182,20 @@ jobs:
       - name: Build
         run: cargo build --locked --release -p owlet-gpui --target ${{ env.TARGET }}
 
-      # No .app/.dmg bundler exists for this gpui-kit crate yet (see FEAT-003
-      # findings), so this packages the plain binary. The updater falls back
-      # to the release page when no `.dmg` asset is found.
+      # Ad-hoc signed Owlet.app inside a drag-to-Applications .dmg. The
+      # updater looks for exactly this `owlet-ui-<tag>-<target>.dmg` name.
       - name: Package
         run: |
           name="owlet-ui-${GITHUB_REF_NAME}-${TARGET}"
-          mkdir -p "dist-ui/${name}"
-          cp "target/${TARGET}/release/owlet-gpui" "dist-ui/${name}/"
-          tar -C dist-ui -czf "dist-ui/${name}.tar.gz" "${name}"
-          (cd dist-ui && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          crates/owlet-gpui/bundle-macos.sh "target/${TARGET}/release/owlet-gpui" "${GITHUB_REF_NAME#v}" dist-ui
+          mv dist-ui/Owlet.dmg "dist-ui/${name}.dmg"
+          (cd dist-ui && shasum -a 256 "${name}.dmg" > "${name}.dmg.sha256")
 
       - uses: actions/upload-artifact@v7
         with:
           name: owlet-ui-${{ env.TARGET }}
           path: |
-            dist-ui/*.tar.gz
+            dist-ui/*.dmg
             dist-ui/*.sha256
           if-no-files-found: error
 
@@ -239,6 +237,7 @@ jobs:
         with:
           files: |
             dist/*.tar.gz
+            dist/*.dmg
             dist/*.wasm
             dist/*.sha256
           generate_release_notes: true

@@ -60,9 +60,9 @@ To run owlet as a background service on Linux, see [docs/systemd.md](docs/system
 
 ### Desktop UI (macOS)
 
-Download `owlet-ui-<version>-aarch64-apple-darwin.tar.gz` from Releases (Apple Silicon only), extract it, and run the `owlet-gpui` binary inside. The app runs owlet inside itself, so you do not need the CLI to use it. See [Desktop UI](#desktop-ui) for what it does.
+Download `owlet-ui-<version>-aarch64-apple-darwin.dmg` from Releases (Apple Silicon only), open it, and drag `Owlet.app` to Applications. The app runs owlet inside itself, so you do not need the CLI to use it. See [Desktop UI](#desktop-ui) for what it does.
 
-There is no signed/notarized `.app` bundle yet, so macOS may warn about an unidentified developer when you run the extracted binary from Finder; allow it under System Settings → Privacy & Security, or remove the quarantine flag with `xattr -d com.apple.quarantine owlet-gpui`.
+The app is ad-hoc signed but not notarized, so macOS may refuse to open it the first time; allow it under System Settings → Privacy & Security, or remove the quarantine flag with `xattr -dr com.apple.quarantine /Applications/Owlet.app`.
 
 On other platforms, build the UI from source (see [Desktop UI](#desktop-ui)).
 
